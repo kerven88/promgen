@@ -1,0 +1,94 @@
+[build-system]
+requires = ["setuptools"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "promgen"
+version = "0.76.0.dev"
+authors = [{ name = "LINE Corporation", email = "dl_oss_dev@linecorp.com" }]
+classifiers = [
+    "Environment :: Web Environment",
+    "Framework :: Django",
+    "Intended Audience :: Developers",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3.6",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python",
+    "Topic :: Internet :: WWW/HTTP :: Dynamic Content",
+    "Topic :: Internet :: WWW/HTTP",
+]
+readme = { file = "README.md", content-type = "text/markdown" }
+requires-python = ">=3.9"
+dependencies = [
+    "Django==4.2.26",
+    "atomicwrites",
+    "celery",
+    "django-environ",
+    "django-filter",
+    "django-guardian",
+    "django-rest-knox",
+    "django-sri",
+    "djangorestframework",
+    "drf-spectacular",
+    "kombu",
+    "prometheus-client",
+    "python-dateutil",
+    "pyyaml",
+    "requests",
+    "social-auth-app-django>=2.0.0",
+]
+
+[tool.setuptools.packages]
+find = {}
+
+[project.urls]
+Source = "https://github.com/line/promgen"
+Tracker = "https://github.com/line/promgen/issues"
+Documentation = "https://line.github.io/promgen/"
+
+[project.optional-dependencies]
+dev = ["codecov", "flake8", "unittest-xml-reporting"]
+docs = ["Sphinx", "sphinxcontrib-httpdomain"]
+mysql = ["mysqlclient"]
+
+[project.scripts]
+promgen = "promgen.manage:main"
+
+[project.entry-points]
+[project.entry-points."promgen.discovery"]
+promgen = "promgen.discovery.default:DiscoveryPromgen"
+
+[project.entry-points."promgen.notification"]
+alertmanager = "promgen.notification.alertmanager:NotificationAlertmanager"
+email = "promgen.notification.email:NotificationEmail"
+linenotify = "promgen.notification.linenotify:NotificationLineNotify"
+pagerduty = "promgen.notification.pagerduty:NotificationPagerDuty"
+slack = "promgen.notification.slack:NotificationSlack"
+user = "promgen.notification.user:NotificationUser"
+webhook = "promgen.notification.webhook:NotificationWebhook"
+
+[tool.ruff]
+line-length = 100
+
+[tool.ruff.lint]
+ignore = [
+    'E741', # Ambiguous variable name
+]
+exclude = [
+    "promgen/migrations/*",
+    "promgen/urls.py",
+]
+
+select = ["E", "F", 'I']
+
+[tool.ruff.format]
+exclude = [
+    "promgen/migrations/*",
+    "promgen/urls.py",
+]
+
+[tool.ruff.lint.isort]
+known-first-party = ["promgen"]
+
+[tool.codespell]
+skip = '*.min.js,*.min.css,*.css.map,.venv,dist,.git'

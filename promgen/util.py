@@ -2,21 +2,23 @@
 # These sources are released under the terms of the MIT license: see LICENSE
 
 import argparse
+import hashlib
+import math
 from urllib.parse import urlsplit
 
 import requests
-
 from django.conf import settings
 from django.db.models import F
-
-from promgen.version import __version__
+from django.http import HttpResponse
 
 # Wrappers around request api to ensure we always attach our user agent
 # https://github.com/requests/requests/blob/master/requests/api.py
 
 
-USER_AGENT = f"promgen/{__version__}"
-ACCEPT_HEADER = "application/openmetrics-text; version=0.0.1,text/plain;version=0.0.4;q=0.5,*/*;q=0.1"
+USER_AGENT = f"promgen/{settings.PROMGEN_VERSION}"
+ACCEPT_HEADER = (
+    "application/openmetrics-text; version=0.0.1,text/plain;version=0.0.4;q=0.5,*/*;q=0.1"
+)
 
 
 def post(url, data=None, json=None, **kwargs):
@@ -58,6 +60,13 @@ def scrape(url, params=None, **kwargs):
     return requests.get(url, params=params, **kwargs)
 
 
+def join_url(base, path):
+    """
+    Append a path to a base URL, keeping any path prefix of the base URL
+    """
+    return f"{base.removesuffix('/')}/{path.removeprefix('/')}"
+
+
 def setting(key, default=None, domain=None):
     """
     Settings helper based on saltstack's query
@@ -79,7 +88,7 @@ def setting(key, default=None, domain=None):
         try:
             rtn = rtn[index]
         except KeyError:
-            if default != KeyError:
+            if default is not KeyError:
                 return default
             raise KeyError(f"Missing required setting: {key}")
     return rtn
@@ -120,6 +129,113 @@ def help_text(klass):
         return klass._meta.get_field(field).help_text
 
     return wrapped
+
+
+def proxy_error(response: requests.Response) -> HttpResponse:
+    """
+    Return a wrapped proxy error
+
+    Taking a request.response object as input, return it slightly modified
+    with an extra header for debugging so that we can see where the request
+    failed
+    """
+    r = HttpResponse(
+        response.content,
+        content_type=response.headers["content-type"],
+        status=response.status_code,
+    )
+    r.setdefault("X-PROMGEN-PROXY", response.url)
+    return r
+
+
+# Convert Prometheus's Histogram/Quantile float representation to Go string
+# https://github.com/prometheus/client_python/blob/master/prometheus_client/utils.py#L9
+def float_to_go_string(d):
+    d = float(d)
+    if d == float("inf"):
+        return "+Inf"
+    elif d == float("-inf"):
+        return "-Inf"
+    elif math.isnan(d):
+        return "NaN"
+    else:
+        s = repr(d)
+        dot = s.find(".")
+        # Go switches to exponents sooner than Python.
+        # We only need to care about positive values for le/quantile.
+        if d > 0 and dot > 6:
+            mantissa = f"{s[0]}.{s[1:dot]}{s[dot + 1 :]}".rstrip("0.")
+            return f"{mantissa}e+0{dot - 1}"
+        return s
+
+
+def categorize_error(e: Exception) -> str:
+    """
+    Categorize an exception into a string label
+    """
+    if isinstance(e, ImportError):
+        return "import_error"
+    elif isinstance(e, requests.HTTPError):
+        return (
+            str(e.response.status_code) + "_http_error" if e.response is not None else "other_error"
+        )
+    else:
+        return "other_error"
+
+
+def fingerprint(body):
+    buff = ""
+    for k, v in sorted(body.get("groupLabels", {}).items()):
+        buff += k
+        buff += v
+
+    return hashlib.sha1(buff.encode("utf8")).hexdigest()
+
+
+def truncate_json_fields(data, default_limits=128):
+    """
+    Recursively truncate fields in a JSON object.
+
+    Args:
+        data: The JSON to process.
+        default_limits (int): Default maximum length for fields not specified.
+
+    Returns:
+        A new JSON with truncated fields.
+    """
+    # A given field-length mapping for specifying the maximum lengths of fields in Promgen models
+    LOG_FIELD_LIMITS = {
+        "clause": 8192,  # Rule
+    }
+
+    if isinstance(data, list):
+        return [
+            truncate_json_fields(item, default_limits)
+            if isinstance(item, (dict, list))
+            else item[:default_limits]
+            + ("..." if isinstance(item, str) and len(item) > default_limits else "")
+            if isinstance(item, str)
+            else item
+            for item in data
+        ]
+
+    truncated_data = {}
+    if getattr(data, "items", None) is None:
+        return None
+    for field, value in data.items():
+        if isinstance(value, (dict, list)):
+            truncated_data[field] = truncate_json_fields(value, default_limits)
+        elif field in LOG_FIELD_LIMITS and isinstance(value, str):
+            truncated_data[field] = value[: LOG_FIELD_LIMITS[field]] + (
+                "..." if len(value) > LOG_FIELD_LIMITS[field] else ""
+            )
+        elif isinstance(value, str):
+            truncated_data[field] = value[:default_limits] + (
+                "..." if len(value) > default_limits else ""
+            )
+        else:
+            truncated_data[field] = value
+    return truncated_data
 
 
 # Comment wrappers to get the docstrings from the upstream functions

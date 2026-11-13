@@ -1,3 +1,4 @@
+{% load sri %}
 {% load static %}
 <!DOCTYPE html>
 <html>
@@ -5,39 +6,87 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>{% block title %}Promgen {{ VERSION }}{% endblock %}</title>
-  <link rel="stylesheet" href="{% static 'css/bootstrap.min.css' %}">
-  <link rel="stylesheet" href="{% static 'css/bootstrap-theme.min.css' %}">
-  <link rel="stylesheet" href="{% static 'css/bootstrap-switch.min.css' %}">
-  <link rel="stylesheet" href="{% static 'css/promgen.css' %}">
-  <link rel="icon" href="{% static 'images/promgen_logo_color.png' %}">
+  <title v-pre>{% block title %}Promgen {{ VERSION }}{% endblock %}</title>
+  {% sri_static "css/bootstrap.min.css" %}
+  {% sri_static "css/bootstrap-theme.min.css" %}
+  {% sri_static "css/bootstrap-switch.min.css" %}
+  <link
+    rel="stylesheet"
+    href="{% static 'css/promgen.css' %}?v=3"
+    integrity="{% sri_integrity_static 'css/promgen.css' %}"
+    crossorigin="anonymous"
+  >
+  {% sri_static "css/select2-4.1.0-rc.0.min.css" %}
+  {% sri_static "css/select2-bootstrap-v0.1.0-beta.10.min.css" %}
+  {% sri_static "images/promgen_logo_color.png" rel="icon" %}
 </head>
 
 <body>
   <div id="vue">
+    {% if debug %}
+    <div class="alert alert-warning" role="alert">Currently in DEBUG Mode</div>
+    {% endif %}
     {% block navbar %}
     {% include "promgen/navbar.html" %}
     {% endblock %}
     <div class="container">
       {% include 'promgen/global_messages.html' %}
-      <silence-form></silence-form>
+      <silence-create-or-update-modal></silence-create-or-update-modal>
+      <silence-list-modal></silence-list-modal>
       {% include 'promgen/global_alerts.html' %}
       {% include 'promgen/global_silences.html' %}
       {% block content %}{% endblock %}
     </div>
   </div>
-  <script src="{% static 'js/jquery.min.js' %}"></script>
-  <script src="{% static 'js/bootstrap.min.js' %}"></script>
-  <script src="{% static 'js/bootstrap-switch.min.js' %}"></script>
-  <script src="{% static 'js/luxon.min.js' %}"></script>
-  <script src="{% static 'js/linkify.min.js' %}"></script>
-  <script src="{% static 'js/linkify-string.min.js' %}"></script>
-  <script src="{% static 'js/vue.min.js' %}"></script>
-  <script type="text/x-template" id="silence-form-template">
-    {% include 'promgen/silence_form.html' %}
+  {% sri_static "js/jquery.min.js" %}
+  {% sri_static "js/bootstrap.min.js" %}
+  {% sri_static "js/bootstrap-switch.min.js" %}
+  {% sri_static "js/luxon.min.js" %}
+  {% sri_static "js/linkify.min.js" %}
+  {% sri_static "js/linkify-string.min.js" %}
+  {% sri_static "js/select2-4.1.0-rc.0.min.js" %}
+  {% if debug %}
+  {% sri_static "js/vue-3.3.7/vue.global.js" %}
+  {% else %}
+  {% sri_static "js/vue-3.3.7/vue.global.prod.js" %}
+  {% endif %}
+  <script type="text/x-template" id="bootstrap-panel-template">
+    {% include 'promgen/vue/bootstrap_panel.html' %}
   </script>
-  <script src="{% static 'js/promgen.js' %}"></script>
-  <script src="{% static 'js/promgen.vue.js' %}"></script>
+  <script type="text/x-template" id="exporter-result-template">
+    {% include 'promgen/vue/exporter_result.html' %}
+  </script>
+  <script type="text/x-template" id="exporter-test-template">
+    {% include 'promgen/vue/exporter_test.html' %}
+  </script>
+  <script type="text/x-template" id="data-source-usage-template">
+    {% include 'promgen/vue/data_source_usage.html' %}
+  </script>
+  <script type="text/x-template" id="silence-create-or-update-modal-template">
+    {% include 'promgen/vue/silence_create_or_update_modal.html' %}
+  </script>
+  <script type="text/x-template" id="silence-row-template">
+    {% include 'promgen/vue/silence_row.html' %}
+  </script>  
+  <script type="text/x-template" id="silence-list-modal-template">
+    {% include 'promgen/vue/silence_list_modal.html' %}
+  </script>
+  <script
+    src="{% static 'js/promgen.js' %}?v=12"
+    integrity="{% sri_integrity_static 'js/promgen.js' %}"
+    crossorigin="anonymous"
+  ></script>
+  <script
+    src="{% static 'js/mixins.vue.js' %}"
+    integrity="{% sri_integrity_static 'js/mixins.vue.js' %}"
+    crossorigin="anonymous"
+  ></script>
+  <script
+    src="{% static 'js/promgen.vue.js' %}?v=8"
+    integrity="{% sri_integrity_static 'js/promgen.vue.js' %}"
+    crossorigin="anonymous"
+  ></script>
+  {% sri_static "js/rapidoc-9.3.8/rapidoc.min.js" %}
   {% block javascript %}{% endblock %}
 
   <datalist style="display:none" id="common.labels">
@@ -56,6 +105,8 @@
     <option>minor</option>
     <option>debug</option>
   </datalist>
+
+  <script>app.mount("#vue")</script>
 </body>
 
 </html>

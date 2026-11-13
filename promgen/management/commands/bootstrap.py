@@ -9,14 +9,12 @@ from django.core.management.base import BaseCommand
 
 from promgen import PROMGEN_CONFIG_DIR, PROMGEN_CONFIG_FILE
 
-PROMGEN_CONFIG_DEFAULT = (
-    settings.BASE_DIR / "promgen" / "tests" / "examples" / "promgen.yml"
-)
+PROMGEN_CONFIG_DEFAULT = settings.BASE_DIR / "promgen" / "tests" / "examples" / "promgen.yml"
 
 
 class Command(BaseCommand):
     # We manually run the system checks at the end
-    requires_system_checks = False
+    requires_system_checks = []
 
     def prompt(self, prompt, *args, **kwargs):
         return input(prompt.format(*args, **kwargs))
@@ -63,9 +61,3 @@ class Command(BaseCommand):
             shutil.copy(PROMGEN_CONFIG_DEFAULT, PROMGEN_CONFIG_FILE)
         else:
             self.success("Config {} Exists", PROMGEN_CONFIG_FILE)
-
-        self.write("Checking environment settings", color=self.style.MIGRATE_HEADING)
-        self.setting("SECRET_KEY", default=settings.SECRET_KEY)
-        self.setting("DATABASE_URL")
-        self.setting("CELERY_BROKER_URL")
-        self.stdout.write("")

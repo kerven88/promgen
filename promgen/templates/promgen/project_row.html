@@ -1,19 +1,33 @@
 {% load i18n %}
 <tr>
-    <td><a href="{{project.get_absolute_url}}">{{ project.name }}</a></td>
+    <td><a href="{{project.get_absolute_url}}" v-pre>{{ project.name }}</a></td>
 
     <td>
-        <table style="width: 100%">
+        <table class="p-0" style="width: 100%; table-layout: fixed; padding: 0;">
             {% for exporter in project.exporter_set.all %}
             <tr {% if not exporter.enabled %}class="promgen-disabled" {% endif %}>
-                <td>{{ exporter.job }}</td>
-                <td>{{ exporter.port }}</td>
-                <td>{{ exporter.path }}</td>
+                <td
+                    class="col-xs-4"
+                    style="overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding-left: 0px;"
+                    v-pre
+                >
+                    {{ exporter.job }}
+                </td>
+                <td class="col-xs-2" v-pre>{{ exporter.port }}</td>
+                <td
+                    class="col-xs-6"
+                    style="overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding-right: 0px;"
+                    v-pre
+                >
+                    {{ exporter.path_value }}
+                </td>
             </tr>
             {% empty %}
             <tr>
                 <td colspan="3">
+                    {% if role == "ADMIN" or role == "EDIT" %}
                     <a href="{% url 'project-exporter' project.id %}" class="btn btn-primary btn-xs">{% trans "Register Exporter" %}</a>
+                    {% endif %}
                 </td>
             </tr>
             {% endfor %}
@@ -24,13 +38,15 @@
         <table style="width: 100%">
             {% for notifier in project.notifiers.all %}
             <tr>
-                <td title="Added by: {{notifier.owner}}">{{ notifier.sender }}</td>
-                <td>{{ notifier.show_value }}</td>
+                <td title="Added by: {{notifier.owner}}" v-pre>{{ notifier.sender }}</td>
+                <td style="word-break: break-all" v-pre>{{ notifier.show_value }}</td>
             </tr>
             {% empty %}
             <tr>
                 <td colspan="2">
+                    {% if role == "ADMIN" or role == "EDIT" %}
                     <a href="{% url 'project-notifier' project.id %}" class="btn btn-primary btn-xs">{% trans "Register Notifier" %}</a>
+                    {% endif %}
                 </td>
             </tr>
             {% endfor %}
@@ -38,6 +54,8 @@
     </td>
 
     <td>
+        {% if role == "ADMIN" or role == "EDIT" %}
         <a @click="setSilenceDataset" class="btn btn-warning btn-xs" data-project="{{project.name}}" data-service="{{service.name}}">{% trans "Silence" %}</a>
+        {% endif %}
     </td>
 </tr>

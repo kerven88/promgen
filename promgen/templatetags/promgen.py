@@ -8,19 +8,21 @@ from datetime import datetime
 from urllib.parse import urlencode
 
 import yaml
-from pytz import timezone
-
 from django import template
+from django.contrib.auth.models import Group, Permission
 from django.urls import reverse
+from django.utils import timezone
 from django.utils.html import format_html
 from django.utils.safestring import mark_safe
-from django.utils.translation import ugettext as _
+from django.utils.translation import gettext as _
+from guardian.models import GroupObjectPermission, UserObjectPermission
+from guardian.shortcuts import get_groups_with_perms, get_users_with_perms
 
-from promgen import util
+from promgen import permissions as promgen_permissions
 
 register = template.Library()
 
-EXCLUSION_MACRO = '<exclude>'
+EXCLUSION_MACRO = "<exclude>"
 
 
 @register.filter()
@@ -41,7 +43,7 @@ def rule_dict(rule):
 
 @register.filter()
 def rulemacro(rule, clause=None):
-    '''
+    """
     Macro rule expansion
 
     Assuming a list of rules with children and parents, expand our macro to exclude child rules
@@ -57,7 +59,7 @@ def rulemacro(rule, clause=None):
         foo{project~="A|B"} / bar{project~="A|B"} > 5
         foo{project="A", } / bar{project="A"} > 3
         foo{project="B"} / bar{project="B"} > 4
-    '''
+    """
 
     if not clause:
         clause = rule.clause
@@ -66,12 +68,8 @@ def rulemacro(rule, clause=None):
     for r in rule.overrides.all():
         labels[r.content_type.model].append(r.content_object.name)
 
-    filters = {
-        k: '|'.join(labels[k]) for k in sorted(labels)
-    }
-    macro = ','.join(
-        sorted(f'{k}!~"{v}"' for k, v in filters.items())
-    )
+    filters = {k: "|".join(labels[k]) for k in sorted(labels)}
+    macro = ",".join(sorted(f'{k}!~"{v}"' for k, v in filters.items()))
     return clause.replace(EXCLUSION_MACRO, macro)
 
 
@@ -83,10 +81,10 @@ def diff_json(a, b):
         b = json.loads(b)
     a = json.dumps(a, indent=4, sort_keys=True).splitlines(keepends=True)
     b = json.dumps(b, indent=4, sort_keys=True).splitlines(keepends=True)
-    diff = ''.join(difflib.unified_diff(a, b))
+    diff = "".join(difflib.unified_diff(a, b))
     if diff:
         return diff
-    return 'No Changes'
+    return "No Changes"
 
 
 @register.filter()
@@ -103,9 +101,16 @@ def pretty_yaml(data):
 
 @register.filter()
 def strftime(timestamp, fmt):
-    tz = util.setting("timezone", "UTC")
+    """
+    Convert a timestamp to a specific format.
+
+    Normally we would use the built in django `time` filters, but sometimes we
+    get a numeric value as a timestamp (from Prometheus results) so we want a
+    single place where we can convert any type of value to a timestamp.
+    """
     if isinstance(timestamp, int) or isinstance(timestamp, float):
-        return timezone(tz).localize(datetime.fromtimestamp(timestamp)).strftime(fmt)
+        dt = datetime.fromtimestamp(timestamp, timezone.utc)
+        return timezone.localtime(dt).strftime(fmt)
     return timestamp
 
 
@@ -155,6 +160,14 @@ def breadcrumb(instance=None, label=None):
         if obj.content_type.model == "project":
             yield from project(obj.content_object)
 
+    def farm(obj):
+        yield from project(obj.project)
+        yield obj.get_absolute_url(), obj.name
+
+    def group(obj):
+        yield reverse("group-list"), _("Groups")
+        yield reverse("group-detail", kwargs={"pk": obj.pk}), obj.name
+
     def generator():
         yield reverse("home"), _("Home")
         if isinstance(instance, models.Sender):
@@ -169,9 +182,13 @@ def breadcrumb(instance=None, label=None):
             yield from rule(instance)
         if isinstance(instance, models.Alert):
             yield from alert(instance)
+        if isinstance(instance, models.Farm):
+            yield from farm(instance)
+        if isinstance(instance, models.Group):
+            yield from group(instance)
 
     def to_tag():
-        yield '<ol class="breadcrumb">'
+        yield '<ol class="breadcrumb" v-pre>'
         for href, text in generator():
             yield format_html('<li><a href="{}">{}</a></li>', mark_safe(href), text)
         if label:
@@ -214,3 +231,92 @@ def urlqs(view, **kwargs):
     This only works for views that do not need additional parameters
     """
     return reverse(view) + "?" + urlencode(kwargs)
+
+
+@register.filter()
+def get_users_roles(object):
+    users_with_perms = get_users_with_perms(
+        object,
+        attach_perms=True,
+        with_superusers=False,
+        with_group_users=False,
+        # Only include users with Admin, Editor, Viewer permissions
+        only_with_perms_in=[
+            "service_admin",
+            "service_editor",
+            "service_viewer",
+            "project_admin",
+            "project_editor",
+            "project_viewer",
+            "group_admin",
+            "group_member",
+        ],
+    ).items()
+    return {
+        user: [Permission.objects.get(codename=perm).name for perm in perms]
+        for user, perms in sorted(users_with_perms, key=lambda item: item[0].username)
+    }.items()
+
+
+@register.filter()
+def get_groups_roles(object):
+    groups_with_perms = get_groups_with_perms(
+        object,
+        attach_perms=True,
+    ).items()
+    return {
+        group: [Permission.objects.get(codename=perm).name for perm in perms]
+        for group, perms in sorted(groups_with_perms, key=lambda item: item[0].name)
+    }.items()
+
+
+@register.simple_tag
+def audit_log_link(log):
+    """
+    Generate link to object from audit log.
+    If the object has been deleted, try to link to the parent object.
+    """
+    from django.contrib.contenttypes.models import ContentType
+
+    from promgen import models
+
+    def generate_link(obj):
+        if (
+            isinstance(obj, models.Service)
+            or isinstance(obj, models.Project)
+            or isinstance(obj, models.Group)
+            or isinstance(obj, models.Farm)
+            or isinstance(obj, models.Host)
+            or isinstance(obj, models.Rule)
+            or isinstance(obj, models.Sender)
+        ):
+            return obj.get_absolute_url()
+        if isinstance(obj, models.Exporter):
+            return obj.project.get_absolute_url() + "#exporters"
+        if isinstance(obj, models.URL):
+            return obj.project.get_absolute_url() + "#urls"
+        if isinstance(obj, UserObjectPermission) or isinstance(obj, GroupObjectPermission):
+            return generate_link(obj.content_object) + "#members"
+        if isinstance(obj, Group):
+            return reverse("group-detail", kwargs={"pk": obj.pk})
+        return ""
+
+    obj = None
+    if log.content_object:
+        obj = log.content_object
+    else:
+        try:
+            model_class = ContentType.objects.get(id=log.parent_content_type_id).model_class()
+            obj = model_class.objects.get(pk=log.parent_object_id)
+        except Exception:
+            pass
+
+    if obj:
+        return format_html('<a href="{}">{}</a>', mark_safe(generate_link(obj)), obj)
+    return ""
+
+
+@register.simple_tag(takes_context=True)
+def current_role(context, obj):
+    user = context.request.user
+    return promgen_permissions.get_highest_role(user, obj)

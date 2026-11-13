@@ -1,0 +1,1845 @@
+# Copyright (c) 2026 LINE Corporation
+# These sources are released under the terms of the MIT license: see LICENSE
+import datetime
+import uuid
+from http import HTTPStatus
+
+from django.contrib.auth.models import User
+from django.contrib.contenttypes.models import ContentType
+from django.core.exceptions import ValidationError as DjangoValidationError
+from django.db.models import Q
+from django.urls import re_path
+from drf_spectacular.utils import (
+    OpenApiParameter,
+    extend_schema,
+    extend_schema_view,
+    inline_serializer,
+)
+from drf_spectacular.views import SpectacularAPIView
+from guardian.conf.settings import ANONYMOUS_USER_NAME
+from guardian.models import GroupObjectPermission
+from guardian.shortcuts import assign_perm, get_perms, remove_perm
+from rest_framework import (
+    exceptions,
+    mixins,
+    pagination,
+    routers,
+    viewsets,
+)
+from rest_framework import (
+    serializers as drf_serializers,
+)
+from rest_framework.decorators import action
+from rest_framework.exceptions import MethodNotAllowed, NotFound, PermissionDenied, ValidationError
+from rest_framework.renderers import TemplateHTMLRenderer
+from rest_framework.response import Response
+from rest_framework.serializers import as_serializer_error
+from rest_framework.views import APIView, exception_handler
+
+import promgen.templatetags.promgen as promgen_templatetags
+from promgen import (
+    discovery,
+    filters,
+    models,
+    permissions,
+    serializers,
+    settings,
+    signals,
+    validators,
+)
+from promgen.permissions import (
+    GROUP_MEMBER_AND_HIGHER_PERMS,
+    PROJECT_ADMIN_AND_HIGHER_PERMS,
+    PROJECT_EDITOR_AND_HIGHER_PERMS,
+    PROJECT_VIEWER_AND_HIGHER_PERMS,
+    SERVICE_EDITOR_AND_HIGHER_PERMS,
+    SERVICE_VIEWER_AND_HIGHER_PERMS,
+)
+from promgen.templatetags import promgen as shortcuts
+
+
+class SpectacularRapiDocView(APIView):
+    renderer_classes = [TemplateHTMLRenderer]
+    template_name = "rest_framework/api_v2.html"
+
+    @extend_schema(exclude=True)
+    def get(self, request):
+        api_tokens = models.AuthToken.objects.filter(user=self.request.user)
+        return Response(
+            data={"api_tokens": api_tokens},
+            template_name=self.template_name,
+        )
+
+
+class Router(routers.DefaultRouter):
+    include_root_view = False
+
+    def get_urls(self):
+        urls = super().get_urls()
+
+        urls.append(
+            re_path(
+                rf"^schema{self.trailing_slash}$",
+                SpectacularAPIView.as_view(),
+                name="schema",
+            )
+        )
+
+        urls.append(
+            re_path(
+                rf"^docs{self.trailing_slash}$",
+                SpectacularRapiDocView.as_view(),
+                name="docs",
+            )
+        )
+
+        return urls
+
+
+def custom_exception_handler(exc, context):
+    if isinstance(exc, DjangoValidationError):
+        # Convert DjangoValidationError to a DRFValidationError
+        exc = ValidationError(detail=as_serializer_error(exc))
+
+    # Call REST framework's default exception handler first,
+    # to get the standard error response.
+    response = exception_handler(exc, context)
+
+    if response is None:
+        # If the response is None, an unexpected Python or Django exception occurs.
+        # We will return a server_error response.
+        return exceptions.server_error(context["request"])
+
+    return response
+
+
+class PromgenPagination(pagination.PageNumberPagination):
+    page_query_param = "page_number"
+    page_size_query_param = "page_size"
+    page_size = 10
+    max_page_size = 1000
+
+    def __init__(self):
+        super().__init__()
+        self.page_query_description = self.page_query_description + " Starts from 1."
+        self.page_size_query_description = self.page_size_query_description + str.format(
+            " Defaults to {}.", self.page_size
+        )
+
+
+class PermissionManagementMixin:
+    @extend_schema(
+        summary="List Users",
+        description="Retrieve list of users which are members of the specified object.",
+        parameters=[
+            OpenApiParameter(
+                name="role",
+                required=False,
+                type=str,
+                enum=["ADMIN", "EDITOR", "VIEWER"],
+                description="Optional role filter.",
+            )
+        ],
+        responses=serializers.UserWithPermRetrieveSerializer(many=True),
+    )
+    @action(
+        detail=True,
+        methods=["get"],
+        url_path="users",
+        filterset_class=None,
+    )
+    def users(self, request, id):
+        object = self.get_object()
+        users_with_perm = promgen_templatetags.get_users_roles(object)
+        payload = [
+            {
+                "id": user.id,
+                "username": user.username,
+                "email": user.email,
+                "role": perm[0].upper(),
+            }
+            for user, perm in users_with_perm
+        ]
+
+        role = request.query_params.get("role")
+        if role:
+            payload = [item for item in payload if item["role"] == role]
+
+        payload = sorted(payload, key=lambda item: item["username"].lower())
+
+        page = self.paginate_queryset(payload)
+        return self.get_paginated_response(
+            serializers.UserWithPermRetrieveSerializer(page, many=True).data
+        )
+
+    @extend_schema(
+        summary="List Groups",
+        description="Retrieve list of groups which are members of the specified object.",
+        parameters=[
+            OpenApiParameter(
+                name="role",
+                required=False,
+                type=str,
+                enum=["ADMIN", "EDITOR", "VIEWER"],
+                description="Optional role filter.",
+            )
+        ],
+        responses=serializers.GroupWithPermRetrieveSerializer(many=True),
+    )
+    @action(detail=True, methods=["get"], url_path="groups", filterset_class=None)
+    def groups(self, request, id):
+        object = self.get_object()
+        groups_with_perm = promgen_templatetags.get_groups_roles(object)
+
+        payload = [
+            {
+                "id": group.id,
+                "name": group.name,
+                "role": perm[0].upper(),
+            }
+            for group, perm in groups_with_perm
+        ]
+
+        role = request.query_params.get("role")
+        if role:
+            payload = [item for item in payload if item["role"] == role]
+
+        payload = sorted(payload, key=lambda item: item["name"].lower())
+        page = self.paginate_queryset(payload)
+        return self.get_paginated_response(
+            serializers.GroupWithPermRetrieveSerializer(page, many=True).data
+        )
+
+    @extend_schema(
+        summary="Assign User",
+        description="Assign permission for a user to the specified object. "
+        "Assigning permission for an already assigned user will override the role.",
+        request=serializers.PermissionAssignSerializer,
+        responses=serializers.UserObjectPermissionSerializer,
+    )
+    @users.mapping.post
+    def assign_user(self, request, id):
+        object = self.get_object()
+        serializer = serializers.PermissionAssignSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+
+        user = User.objects.get(id=serializer.validated_data["id"])
+        content_type = ContentType.objects.get_for_model(object)
+        permission = content_type.model + "_" + serializer.validated_data["role"].lower()
+        validators.validate_assign_perm(user, object, permission)
+        user_object_perm = assign_perm(permission, user, object)
+        return Response(
+            serializers.UserObjectPermissionSerializer(user_object_perm).data,
+            status=HTTPStatus.CREATED,
+        )
+
+    @extend_schema(
+        summary="Assign Group",
+        description="Assign permission for a group to the specified object. "
+        "Assigning permission for an already assigned group will override the role.",
+        request=serializers.PermissionAssignSerializer,
+        responses=serializers.GroupObjectPermissionSerializer,
+    )
+    @groups.mapping.post
+    def assign_group(self, request, id):
+        object = self.get_object()
+        serializer = serializers.PermissionAssignSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+
+        group = models.Group.objects.get(id=serializer.validated_data["id"])
+        content_type = ContentType.objects.get_for_model(object)
+        permission = content_type.model + "_" + serializer.validated_data["role"].lower()
+        group_object_perm = assign_perm(permission, group, object)
+        return Response(
+            serializers.GroupObjectPermissionSerializer(group_object_perm).data,
+            status=HTTPStatus.CREATED,
+        )
+
+    def remove_perm(self, user_or_group, remove_sub_permissions):
+        obj = self.get_object()
+        permissions = get_perms(user_or_group, obj)
+        for perm in permissions:
+            remove_perm(perm, user_or_group, obj)
+
+        if isinstance(obj, models.Service) and remove_sub_permissions:
+            # Remove all permissions on the Service's projects
+            for project in obj.project_set.all():
+                permissions = get_perms(user_or_group, project)
+                for perm in permissions:
+                    remove_perm(perm, user_or_group, project)
+
+                # If the removed user is the owner of the Project, we need to transfer the ownership
+                # to the Service's owner and assign admin permission for them.
+                if isinstance(user_or_group, User) and user_or_group == project.owner:
+                    assign_perm("project_admin", obj.owner, project)
+                    project.owner = obj.owner
+                    project.save()
+
+    # We let the GET method return MethodNotAllowed because we don't want to implement this API.
+    # However, we still need to define the function so that Django REST Framework can generate
+    # the correct URL patterns for the other related methods when using the decorator.
+    @extend_schema(exclude=True)
+    @action(detail=True, methods=["get"], url_path=r"users/(?P<user_id>\d+)")
+    def user(self, request, id, user_id):
+        raise MethodNotAllowed(request.method)
+
+    @extend_schema(
+        summary="Remove User",
+        description="Remove a user from the specified object.",
+        parameters=[
+            OpenApiParameter(
+                name="remove_sub_permissions",
+                required=False,
+                type=bool,
+                description="(Only use for Service) Also remove permissions from sub-projects. "
+                "Defaults to True.",
+            )
+        ],
+    )
+    @user.mapping.delete
+    def remove_user(self, request, id, user_id):
+        remove_sub_permissions = (
+            request.query_params.get("remove_sub_permissions", "true").lower() == "true"
+        )
+        user = User.objects.get(id=user_id)
+        validators.validate_remove_perm(user, self.get_object())
+        self.remove_perm(user, remove_sub_permissions)
+        return Response(status=HTTPStatus.NO_CONTENT)
+
+    # We let the GET method return MethodNotAllowed because we don't want to implement this API.
+    # However, we still need to define the function so that Django REST Framework can generate
+    # the correct URL patterns for the other related methods when using the decorator.
+    @extend_schema(exclude=True)
+    @action(detail=True, methods=["get"], url_path=r"groups/(?P<group_id>\d+)")
+    def group(self, request, id, group_id):
+        raise MethodNotAllowed(request.method)
+
+    @extend_schema(
+        summary="Remove Group",
+        description="Remove a group from the specified object.",
+        parameters=[
+            OpenApiParameter(
+                name="remove_sub_permissions",
+                required=False,
+                type=bool,
+                description="(Only use for Service) Also remove permissions from sub-projects. "
+                "Defaults to True.",
+            )
+        ],
+    )
+    @group.mapping.delete
+    def remove_group(self, request, id, group_id):
+        remove_sub_permissions = (
+            request.query_params.get("remove_sub_permissions", "true").lower() == "true"
+        )
+        group = models.Group.objects.get(id=group_id)
+        self.remove_perm(group, remove_sub_permissions)
+        return Response(status=HTTPStatus.NO_CONTENT)
+
+
+class RuleMixin:
+    # We let the GET method return MethodNotAllowed because we don't want to implement this API.
+    # However, we still need to define the function so that Django REST Framework can generate
+    # the correct URL patterns for the other related methods when using the decorator.
+    @extend_schema(exclude=True)
+    @action(detail=True, methods=["get"], url_path="rules")
+    def rules(self, request, id, user_id):
+        raise MethodNotAllowed(request.method)
+
+    @extend_schema(
+        summary="Register Rule",
+        description="Register a new rule for the specified object.",
+        request=serializers.RuleRetrieveDetailSerializer,
+        responses={201: serializers.RuleRetrieveDetailSerializer},
+    )
+    @rules.mapping.post
+    def register_rule(self, request, id):
+        object = self.get_object()
+        serializer = serializers.RuleRetrieveDetailSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+
+        attributes = {
+            "content_type_id": ContentType.objects.get_for_model(
+                object, for_concrete_model=False
+            ).id,
+            "object_id": object.id,
+        }
+
+        for field in serializer.fields:
+            value = serializer.validated_data.get(field)
+            if value is not None:
+                attributes[field] = value
+
+        rule, created = models.Rule.objects.get_or_create(**attributes)
+        return Response(
+            serializers.RuleRetrieveDetailSerializer(rule).data, status=HTTPStatus.CREATED
+        )
+
+    @extend_schema(
+        summary="Override Rule",
+        description="Register a new rule that overrides an existing rule for the specified object.",
+        request=serializers.RuleOverrideSerializer,
+        responses={201: serializers.RuleRetrieveDetailSerializer},
+    )
+    @action(detail=True, methods=["post"], url_path="rules/override", url_name="rules-override")
+    def override_rule(self, request, id):
+        object = self.get_object()
+        serializer = serializers.RuleOverrideSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        original_rule = models.Rule.objects.get(pk=serializer.validated_data["original_rule_id"])
+
+        if isinstance(object, models.Service) and not isinstance(
+            original_rule.content_object, models.Site
+        ):
+            raise ValidationError({"detail": "Service Rule must be inherited from a Site Rule."})
+
+        if isinstance(object, models.Project) and not (
+            isinstance(original_rule.content_object, models.Site)
+            or original_rule.content_object == object.service
+        ):
+            raise ValidationError(
+                {
+                    "detail": "Project Rule must be inherited from a Site Rule "
+                    "or its parent Service Rule."
+                }
+            )
+
+        content_type = ContentType.objects.get_for_model(object).model
+        rule = original_rule.override(
+            content_type, object.id, **serializer.validated_data.get("overrides", {})
+        )
+        return Response(serializers.RuleRetrieveDetailSerializer(rule).data, HTTPStatus.CREATED)
+
+
+def _create_notifier(request, object):
+    serializer = serializers.RegisterNotifierSerializer(data=request.data)
+    serializer.is_valid(raise_exception=True)
+
+    attributes = {
+        "content_type_id": ContentType.objects.get_for_model(object).id,
+        "object_id": object.id,
+        "owner_id": request.user.id,
+    }
+
+    for field in serializer.fields:
+        value = serializer.validated_data.get(field)
+        if value is not None and field != "filters":
+            attributes[field] = value
+
+    notifier, created = models.Sender.objects.get_or_create(**attributes)
+    for filter_data in serializer.validated_data.get("filters", []):
+        models.Filter.objects.get_or_create(sender=notifier, **filter_data)
+
+    return notifier
+
+
+class NotifierMixin:
+    # We let the GET method return MethodNotAllowed because we don't want to implement this API.
+    # However, we still need to define the function so that Django REST Framework can generate
+    # the correct URL patterns for the other related methods when using the decorator.
+    @extend_schema(exclude=True)
+    @action(detail=True, methods=["get"], url_path="notifiers")
+    def notifiers(self, request, id, user_id):
+        raise MethodNotAllowed(request.method)
+
+    @extend_schema(
+        summary="Register Notifier",
+        description="Register a new notifier for the specified object.",
+        request=serializers.RegisterNotifierSerializer,
+        responses={201: serializers.NotifierSerializer},
+    )
+    @notifiers.mapping.post
+    def register_notifier(self, request, id):
+        object = self.get_object()
+        notifier = _create_notifier(request, object)
+        return Response(
+            serializers.NotifierSerializer(notifier).data,
+            status=HTTPStatus.CREATED,
+        )
+
+
+@extend_schema_view(
+    list=extend_schema(summary="List Audit Logs", description="Retrieve a list of all audit logs."),
+)
+@extend_schema(tags=["Log"])
+class AuditViewSet(mixins.ListModelMixin, viewsets.GenericViewSet):
+    queryset = models.Audit.objects.all().order_by("-created")
+    filterset_class = filters.AuditFilter
+    serializer_class = serializers.AuditSerializer
+    lookup_value_regex = "[^/]+"
+    lookup_field = "id"
+    pagination_class = PromgenPagination
+    permission_classes = [permissions.PromgenGuardianRestPermission]
+
+    def get_queryset(self):
+        if self.request.user.is_superuser or self.action != "list":
+            return self.queryset
+        services = permissions.get_accessible_services_for_user(self.request.user)
+        projects = permissions.get_accessible_projects_for_user(self.request.user)
+        groups = permissions.get_accessible_groups_for_user(self.request.user)
+        service_ct = ContentType.objects.get_for_model(models.Service)
+        project_ct = ContentType.objects.get_for_model(models.Project)
+        group_ct = ContentType.objects.get_for_model(models.Group)
+        return self.queryset.filter(
+            Q(
+                content_type__model="service",
+                content_type__app_label="promgen",
+                object_id__in=services,
+            )
+            | Q(
+                content_type__model="project",
+                content_type__app_label="promgen",
+                object_id__in=projects,
+            )
+            | Q(
+                content_type__model="group",
+                content_type__app_label="auth",
+                object_id__in=groups,
+            )
+            | Q(parent_content_type_id=service_ct.id, parent_object_id__in=services)
+            | Q(parent_content_type_id=project_ct.id, parent_object_id__in=projects)
+            | Q(parent_content_type_id=group_ct.id, parent_object_id__in=groups)
+        )
+
+
+@extend_schema_view(
+    list=extend_schema(summary="List Notifiers", description="Retrieve a list of all notifiers."),
+    update=extend_schema(summary="Update Notifier", description="Update an existing notifier."),
+    partial_update=extend_schema(
+        summary="Partially Update Notifier", description="Partially update an existing notifier."
+    ),
+    destroy=extend_schema(summary="Delete Notifier", description="Delete an existing notifier."),
+)
+@extend_schema(tags=["Notifier"])
+class NotifierViewSet(
+    mixins.ListModelMixin,
+    mixins.UpdateModelMixin,
+    mixins.DestroyModelMixin,
+    viewsets.GenericViewSet,
+):
+    queryset = models.Sender.objects.all().order_by("value")
+    filterset_class = filters.NotifierFilter
+    lookup_value_regex = "[^/]+"
+    lookup_field = "id"
+    pagination_class = PromgenPagination
+    permission_classes = [permissions.PromgenGuardianRestPermission]
+
+    def get_action_permissions(self):
+        action_map = {
+            "update": PROJECT_EDITOR_AND_HIGHER_PERMS,
+            "partial_update": PROJECT_EDITOR_AND_HIGHER_PERMS,
+            "destroy": PROJECT_EDITOR_AND_HIGHER_PERMS,
+            "add_filter": PROJECT_EDITOR_AND_HIGHER_PERMS,
+            "delete_filter": PROJECT_EDITOR_AND_HIGHER_PERMS,
+            "test": PROJECT_VIEWER_AND_HIGHER_PERMS,
+        }
+        return action_map.get(self.action, [])
+
+    def get_queryset(self):
+        if self.request.user.is_superuser or self.action != "list":
+            return self.queryset
+        accessible_projects = permissions.get_accessible_projects_for_user(self.request.user)
+        accessible_services = permissions.get_accessible_services_for_user(self.request.user)
+        project_ct = ContentType.objects.get_for_model(models.Project)
+        service_ct = ContentType.objects.get_for_model(models.Service)
+        user_ct = ContentType.objects.get_for_model(User)
+        return self.queryset.filter(
+            Q(content_type=project_ct, object_id__in=accessible_projects)
+            | Q(content_type=service_ct, object_id__in=accessible_services)
+            | Q(content_type=user_ct, object_id=self.request.user.id)
+        )
+
+    def get_serializer_class(self):
+        if self.action in ["update", "partial_update"]:
+            return serializers.UpdateNotifierSerializer
+        return serializers.NotifierSerializer
+
+    @extend_schema(
+        summary="Add Filter",
+        description="Add a filter to the specified notifier.",
+        request=serializers.FilterSerializer,
+        responses=serializers.NotifierSerializer,
+    )
+    @action(detail=True, methods=["post"], url_path="filters")
+    def add_filter(self, request, id):
+        notifier = self.get_object()
+        serializer = serializers.FilterSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        models.Filter.objects.create(
+            sender=notifier,
+            name=serializer.validated_data["name"],
+            value=serializer.validated_data["value"],
+        )
+        return Response(serializers.NotifierSerializer(notifier).data, status=HTTPStatus.CREATED)
+
+    @extend_schema(
+        summary="Delete Filter",
+        description="Delete a filter from the specified notifier.",
+    )
+    @action(detail=True, methods=["delete"], url_path="filters/(?P<filter_id>\d+)")
+    def delete_filter(self, request, id, filter_id):
+        notifier = self.get_object()
+        if notifier:
+            models.Filter.objects.filter(pk=filter_id, sender=notifier).delete()
+        return Response(status=HTTPStatus.NO_CONTENT)
+
+    @extend_schema(
+        summary="Test Notifier",
+        description="Attempt to send a test notification. "
+        "The test result will be included in the response's body. "
+        "Use 0 for the ID to test against a new notifier without creating it.",
+        request=serializers.NotifierTestRequestSerializer,
+        responses={
+            200: inline_serializer(
+                name="NotifierTestResponseSerializer",
+                fields={
+                    "success": drf_serializers.BooleanField(),
+                    "message": drf_serializers.CharField(),
+                },
+            )
+        },
+    )
+    @action(
+        detail=True, methods=["post"], url_path="test", pagination_class=None, filterset_class=None
+    )
+    def test_notifier(self, request, id):
+        if int(id) == 0:
+            serializer = serializers.NotifierTestRequestSerializer(data=request.data)
+            serializer.is_valid(raise_exception=True)
+            notifier = models.Sender(
+                sender=serializer.validated_data["sender"], value=serializer.validated_data["value"]
+            )
+        else:
+            notifier = self.get_object()
+
+        try:
+            notifier.test()
+        except Exception as e:
+            success = False
+            message = "Error sending test message {} to {}: {}.".format(
+                notifier.sender, notifier.show_value(), str(e)
+            )
+        else:
+            success = True
+            message = "Sent test message {} to {}.".format(notifier.sender, notifier.show_value())
+        return Response({"success": success, "message": message}, status=HTTPStatus.OK)
+
+
+@extend_schema_view(
+    list=extend_schema(summary="List Rules", description="Retrieve a list of all rules."),
+    retrieve=extend_schema(
+        summary="Retrieve Rule", description="Retrieve detailed information about a specific rule."
+    ),
+    update=extend_schema(summary="Update Rule", description="Update an existing rule."),
+    partial_update=extend_schema(
+        summary="Partially Update Rule", description="Partially update an existing rule."
+    ),
+    destroy=extend_schema(summary="Delete Rule", description="Delete an existing rule."),
+)
+@extend_schema(tags=["Rule"])
+class RuleViewSet(
+    mixins.RetrieveModelMixin,
+    mixins.ListModelMixin,
+    mixins.UpdateModelMixin,
+    mixins.DestroyModelMixin,
+    viewsets.GenericViewSet,
+):
+    queryset = models.Rule.objects.all()
+    filterset_class = filters.RuleFilterV2
+    lookup_value_regex = "[^/]+"
+    lookup_field = "id"
+    pagination_class = PromgenPagination
+    permission_classes = [permissions.PromgenGuardianRestPermission]
+
+    def get_action_permissions(self):
+        action_map = {
+            "retrieve": PROJECT_VIEWER_AND_HIGHER_PERMS,
+            "update": PROJECT_EDITOR_AND_HIGHER_PERMS,
+            "partial_update": PROJECT_EDITOR_AND_HIGHER_PERMS,
+            "destroy": PROJECT_EDITOR_AND_HIGHER_PERMS,
+            "test": PROJECT_VIEWER_AND_HIGHER_PERMS,
+        }
+        return action_map.get(self.action, [])
+
+    def get_serializer_class(self):
+        if self.action in ["list"]:
+            return serializers.RuleRetrieveSimpleSerializer
+        return serializers.RuleRetrieveDetailSerializer
+
+    def get_queryset(self):
+        if self.request.user.is_superuser or self.action != "list":
+            return self.queryset
+        accessible_projects = permissions.get_accessible_projects_for_user(self.request.user)
+        accessible_services = permissions.get_accessible_services_for_user(self.request.user)
+        project_ct = ContentType.objects.get_for_model(models.Project)
+        service_ct = ContentType.objects.get_for_model(models.Service)
+        site_ct = ContentType.objects.get_for_model(models.Site, for_concrete_model=False)
+        return self.queryset.filter(
+            Q(content_type=project_ct, object_id__in=accessible_projects)
+            | Q(content_type=service_ct, object_id__in=accessible_services)
+            | Q(content_type=site_ct)
+        )
+
+    @extend_schema(
+        summary="Test Rule",
+        description="Attempt to test an alerting Rule. "
+        "The test result will be included in the response's body. "
+        "Use 0 for the ID to test a new rule without creating it.",
+        request=serializers.RuleTestRequestSerializer,
+        responses={
+            200: inline_serializer(
+                name="RuleTestResponseSerializer",
+                fields={
+                    "success": drf_serializers.BooleanField(),
+                    "message": drf_serializers.CharField(),
+                    "details": serializers.RuleTestResultSerializer(),
+                },
+            )
+        },
+    )
+    @action(
+        detail=True, methods=["post"], url_path="test", pagination_class=None, filterset_class=None
+    )
+    def test(self, request, id):
+        if int(id) == 0:
+            serializer = serializers.RuleTestRequestSerializer(data=request.data)
+            serializer.is_valid(raise_exception=True)
+            rule = models.Rule()
+            rule.pk = 0
+            rule.set_object(
+                serializer.validated_data["content_type"],
+                serializer.validated_data["object_id"],
+            )
+            rule.clause = serializer.validated_data["clause"]
+        else:
+            rule = self.get_object()
+
+        try:
+            result = rule.test(rule.clause)
+            result["clause"] = rule.clause
+            return Response(
+                {
+                    "success": True,
+                    "message": "",
+                    "details": serializers.RuleTestResultSerializer(result).data,
+                }
+            )
+        except Exception as e:
+            return Response({"success": False, "message": str(e), "details": {}})
+
+
+@extend_schema_view(
+    list=extend_schema(
+        summary="List Created Farms", description="Retrieve a list of all created farms."
+    ),
+    retrieve=extend_schema(
+        summary="Retrieve Farm", description="Retrieve detailed information about a specific farm."
+    ),
+    update=extend_schema(summary="Update Farm", description="Update an existing farm."),
+    partial_update=extend_schema(
+        summary="Partially Update Farm", description="Partially update an existing farm."
+    ),
+    destroy=extend_schema(summary="Delete Farm", description="Delete an existing farm."),
+)
+@extend_schema(tags=["Farm"])
+class FarmViewSet(
+    mixins.RetrieveModelMixin,
+    mixins.UpdateModelMixin,
+    mixins.DestroyModelMixin,
+    mixins.ListModelMixin,
+    viewsets.GenericViewSet,
+):
+    queryset = models.Farm.objects.all()
+    filterset_class = filters.FarmFilter
+    serializer_class = serializers.FarmRetrieveSerializer
+    lookup_value_regex = "[^/]+"
+    lookup_field = "id"
+    pagination_class = PromgenPagination
+    permission_classes = [permissions.PromgenGuardianRestPermission]
+
+    def get_action_permissions(self):
+        action_map = {
+            "retrieve": PROJECT_VIEWER_AND_HIGHER_PERMS,
+            "update": PROJECT_EDITOR_AND_HIGHER_PERMS,
+            "partial_update": PROJECT_EDITOR_AND_HIGHER_PERMS,
+            "destroy": PROJECT_EDITOR_AND_HIGHER_PERMS,
+            "hosts": PROJECT_VIEWER_AND_HIGHER_PERMS,
+            "register_host": PROJECT_EDITOR_AND_HIGHER_PERMS,
+            "delete_host": PROJECT_EDITOR_AND_HIGHER_PERMS,
+            "sync": PROJECT_EDITOR_AND_HIGHER_PERMS,
+            "convert_to_local_farm": PROJECT_EDITOR_AND_HIGHER_PERMS,
+        }
+        return action_map.get(self.action, [])
+
+    def get_queryset(self):
+        if self.request.user.is_superuser or self.action != "list":
+            return self.queryset
+        accessible_projects = permissions.get_accessible_projects_for_user(self.request.user)
+        return self.queryset.filter(project__in=accessible_projects)
+
+    def update(self, request, *args, **kwargs):
+        farm = self.get_object()
+        if farm.source != discovery.FARM_DEFAULT:
+            raise ValidationError({"detail": "Only local farms can be updated."})
+        return super().update(request, *args, **kwargs)
+
+    def partial_update(self, request, *args, **kwargs):
+        farm = self.get_object()
+        if farm.source != discovery.FARM_DEFAULT:
+            raise ValidationError({"detail": "Only local farms can be updated."})
+        return super().partial_update(request, *args, **kwargs)
+
+    @extend_schema(
+        summary="List Farm Sources",
+        description="Retrieve available farm sources and whether they are remote.",
+        parameters=[
+            OpenApiParameter(
+                name="name",
+                required=False,
+                type=str,
+                description="Filter by source name containing a specific substring. "
+                "Example: name=Example Source",
+            ),
+            OpenApiParameter(
+                name="remote",
+                required=False,
+                type=bool,
+                description="Filter by whether the source is remote. Example: remote=true",
+            ),
+        ],
+        responses=serializers.FarmSourceSerializer(many=True),
+    )
+    @action(detail=False, methods=["get"], filterset_class=None)
+    def sources(self, request):
+        source_data = sorted(
+            [{"name": name, "remote": driver.remote} for name, driver in models.Farm.driver_set()],
+            key=lambda source: source["name"].lower(),
+        )
+
+        name = request.query_params.get("name")
+        if name:
+            source_data = [
+                source for source in source_data if name.lower() in source["name"].lower()
+            ]
+
+        remote = request.query_params.get("remote")
+        if remote is not None:
+            if remote.lower() == "true":
+                remote_bool = True
+            elif remote.lower() == "false":
+                remote_bool = False
+            else:
+                raise ValidationError({"detail": "Invalid value for remote. Use true or false."})
+            source_data = [source for source in source_data if source["remote"] == remote_bool]
+
+        page = self.paginate_queryset(source_data)
+        return self.get_paginated_response(serializers.FarmSourceSerializer(page, many=True).data)
+
+    @extend_schema(
+        summary="List Remote Farms by Source",
+        description="Retrieve remote farm names from the specified remote source.",
+        parameters=[
+            OpenApiParameter(
+                name="name",
+                required=False,
+                type=str,
+                description="Filter by farm name containing a specific substring. "
+                "Example: name=Example Farm",
+            )
+        ],
+        responses=serializers.RemoteFarmSerializer(many=True),
+    )
+    @action(
+        detail=False,
+        methods=["get"],
+        url_path=r"remotes/(?P<source>[^/]+)",
+        filterset_class=None,
+    )
+    def remote(self, request, source):
+        driver = None
+        for driver_name, farm_driver in models.Farm.driver_set():
+            if driver_name == source:
+                driver = farm_driver
+                break
+
+        if driver is None:
+            raise ValidationError({"detail": "Unknown farm source."})
+        if not driver.remote:
+            raise ValidationError({"detail": "Only remote farm sources are supported."})
+
+        name = request.query_params.get("name")
+        remote_farms = set(models.Farm.fetch(source))
+        if name:
+            remote_farms = [farm_name for farm_name in remote_farms if name in farm_name]
+
+        farm_data = sorted(
+            ({"name": farm_name} for farm_name in remote_farms),
+            key=lambda item: item["name"].lower(),
+        )
+        page = self.paginate_queryset(farm_data)
+        return self.get_paginated_response(serializers.RemoteFarmSerializer(page, many=True).data)
+
+    @extend_schema(
+        summary="List Hosts in Farm",
+        description="Retrieve all hosts associated with the specified farm.",
+        parameters=[
+            OpenApiParameter(name="page_number", required=False, type=int),
+            OpenApiParameter(name="page_size", required=False, type=int),
+        ],
+        responses=serializers.HostRetrieveSerializer(many=True),
+    )
+    @action(detail=True, methods=["get"], filterset_class=None)
+    def hosts(self, request, id):
+        farm = self.get_object()
+        hosts = farm.host_set.all()
+        page = self.paginate_queryset(hosts)
+        return self.get_paginated_response(serializers.HostRetrieveSerializer(page, many=True).data)
+
+    @extend_schema(
+        summary="Register Hosts",
+        description="Register new hosts for the specified farm. "
+        "Hosts are only registered if all of the provided hostnames are valid.",
+        request=serializers.HostListSerializer,
+        responses={204: None},
+    )
+    @hosts.mapping.post
+    def register_host(self, request, id):
+        farm = self.get_object()
+        if not farm.source == discovery.FARM_DEFAULT:
+            raise ValidationError({"detail": "Hosts can only be registered to local farms."})
+        hostnames = request.data.get("hosts", [])
+        valid_hosts = set()
+        invalid_hosts = set()
+        for hostname in hostnames:
+            if hostname == "":
+                continue
+            try:
+                validators.hostname(hostname)
+            except DjangoValidationError:
+                invalid_hosts.add(hostname)
+            valid_hosts.add(hostname)
+
+        if invalid_hosts:
+            raise ValidationError(
+                {"detail": "Invalid hostnames.", "extras": {"invalid_hosts": list(invalid_hosts)}}
+            )
+
+        for valid_host in valid_hosts:
+            models.Host.objects.get_or_create(name=valid_host, farm_id=farm.id)
+        return Response(status=HTTPStatus.NO_CONTENT)
+
+    @extend_schema(exclude=True)
+    @action(detail=True, methods=["get"], url_path="hosts/(?P<host_id>\d+)", pagination_class=None)
+    def host(self, request, id, host_id):
+        raise MethodNotAllowed(request.method)
+
+    @extend_schema(
+        summary="Delete Hosts",
+        description="Delete hosts from the specified farm.",
+    )
+    @host.mapping.delete
+    def delete_host(self, request, id, host_id):
+        farm = self.get_object()
+        models.Host.objects.filter(pk=host_id, farm=farm).delete()
+        return Response(status=HTTPStatus.NO_CONTENT)
+
+    @extend_schema(
+        summary="Sync Farm",
+        description="Refresh hosts from the farm source.",
+        request=None,
+        responses=serializers.FarmRetrieveSerializer,
+    )
+    @action(detail=True, methods=["post"], pagination_class=None, filterset_class=None)
+    def sync(self, request, id):
+        farm = self.get_object()
+        if farm.source == discovery.FARM_DEFAULT:
+            raise ValidationError({"detail": "Only remote farms can be synced."})
+        # If any hosts are added or removed, then we want to trigger a config refresh
+        if any(farm.refresh()):
+            signals.trigger_write_config.send(request)
+        return Response(serializers.FarmRetrieveSerializer(farm).data)
+
+    @extend_schema(
+        summary="Convert to Local Farm",
+        description="Convert a remote farm to a local Promgen farm source.",
+        request=None,
+        responses=serializers.FarmRetrieveSerializer,
+    )
+    @action(
+        detail=True,
+        methods=["post"],
+        url_path="convert-to-local",
+        pagination_class=None,
+        filterset_class=None,
+    )
+    def convert_to_local_farm(self, request, id):
+        farm = self.get_object()
+        if farm.source == discovery.FARM_DEFAULT:
+            raise ValidationError({"detail": "Only remote farms can be converted to local."})
+        farm.source = discovery.FARM_DEFAULT
+        farm.save()
+        return Response(serializers.FarmRetrieveSerializer(farm).data)
+
+
+@extend_schema_view(
+    list=extend_schema(summary="List Exporters", description="Retrieve a list of all exporters."),
+    retrieve=extend_schema(
+        summary="Retrieve Exporter",
+        description="Retrieve detailed information about a specific exporter.",
+    ),
+    update=extend_schema(summary="Update Exporter", description="Update an existing exporter."),
+    partial_update=extend_schema(
+        summary="Partially Update Exporter", description="Partially update an existing exporter."
+    ),
+    destroy=extend_schema(summary="Delete Exporter", description="Delete an existing exporter."),
+)
+@extend_schema(tags=["Exporter"])
+class ExporterViewSet(
+    mixins.RetrieveModelMixin,
+    mixins.ListModelMixin,
+    mixins.UpdateModelMixin,
+    mixins.DestroyModelMixin,
+    viewsets.GenericViewSet,
+):
+    queryset = models.Exporter.objects.all()
+    filterset_class = filters.ExporterFilter
+    serializer_class = serializers.ExporterRetrieveSerializer
+    lookup_value_regex = "[^/]+"
+    lookup_field = "id"
+    pagination_class = PromgenPagination
+    permission_classes = [permissions.PromgenGuardianRestPermission]
+
+    def get_action_permissions(self):
+        action_map = {
+            "retrieve": PROJECT_VIEWER_AND_HIGHER_PERMS,
+            "update": PROJECT_EDITOR_AND_HIGHER_PERMS,
+            "partial_update": PROJECT_EDITOR_AND_HIGHER_PERMS,
+            "destroy": PROJECT_EDITOR_AND_HIGHER_PERMS,
+            "test": PROJECT_VIEWER_AND_HIGHER_PERMS,
+        }
+        return action_map.get(self.action, [])
+
+    def get_queryset(self):
+        if self.request.user.is_superuser or self.action != "list":
+            return self.queryset
+        accessible_projects = permissions.get_accessible_projects_for_user(self.request.user)
+        return self.queryset.filter(project__in=accessible_projects)
+
+    @extend_schema(
+        summary="Test Exporter",
+        description="Attempt to test an Exporter by scraping its metrics endpoint. "
+        "The test result will be included in the response's body. "
+        "Use 0 for the ID to test against a new exporter without creating it.",
+        request=serializers.ExporterTestRequestSerializer,
+        responses=serializers.ExporterTestResponseSerializer,
+    )
+    @action(
+        detail=True, methods=["post"], url_path="test", pagination_class=None, filterset_class=None
+    )
+    def test(self, request, id):
+        hosts = request.data.get("hosts", [])
+        serializers.ExporterTestRequestSerializer(data={"hosts": hosts}, partial=True).is_valid(
+            raise_exception=True
+        )
+
+        if int(id) == 0:
+            if not request.data.get("hosts"):
+                raise ValidationError({"detail": "You must specify hosts to test a new exporter."})
+            serializer = serializers.ExporterTestRequestSerializer(data=request.data)
+            serializer.is_valid(raise_exception=True)
+            exporter = models.Exporter(
+                scheme=serializer.validated_data["scheme"],
+                port=serializer.validated_data["port"],
+                path=serializer.validated_data["path"],
+            )
+        else:
+            exporter = self.get_object()
+            if not hosts:
+                if getattr(exporter.project, "farm", None) is None:
+                    raise ValidationError({"detail": "Project has no farm. Please specify hosts."})
+                else:
+                    farm = exporter.project.farm
+                    if farm.host_set.count() == 0:
+                        raise ValidationError(
+                            {"detail": "Project has no hosts. Please specify hosts."}
+                        )
+                    if farm.host_set.count() > settings.V2_API_MAX_HOSTS_PER_EXPORTER_TEST:
+                        raise ValidationError(
+                            {
+                                "detail": "Too many hosts available for the exporter to scrape. "
+                                "Please specify hosts."
+                            }
+                        )
+
+        try:
+            results = serializers.ExporterTestResponseSerializer(exporter.scrape(hosts=hosts))
+            return Response(results.data, status=HTTPStatus.OK)
+        except Exception as e:
+            return Response(
+                {"success": False, "message": str(e), "details": []},
+                status=HTTPStatus.OK,
+            )
+
+
+@extend_schema_view(
+    list=extend_schema(summary="List URLs", description="Retrieve a list of all URLs."),
+    destroy=extend_schema(summary="Delete URL", description="Delete an existing URL."),
+)
+@extend_schema(tags=["URL"])
+class URLViewSet(mixins.ListModelMixin, mixins.DestroyModelMixin, viewsets.GenericViewSet):
+    queryset = models.URL.objects.all()
+    filterset_class = filters.URLFilter
+    serializer_class = serializers.URLSerializer
+    lookup_value_regex = "[^/]+"
+    lookup_field = "id"
+    pagination_class = PromgenPagination
+    permission_classes = [permissions.PromgenGuardianRestPermission]
+
+    def get_action_permissions(self):
+        action_map = {
+            "destroy": PROJECT_EDITOR_AND_HIGHER_PERMS,
+        }
+        return action_map.get(self.action, [])
+
+    def get_queryset(self):
+        if self.request.user.is_superuser or self.action != "list":
+            return self.queryset
+        accessible_projects = permissions.get_accessible_projects_for_user(self.request.user)
+        return self.queryset.filter(project__in=accessible_projects)
+
+
+@extend_schema_view(
+    list=extend_schema(summary="List Probes", description="Retrieve a list of all Probes."),
+)
+@extend_schema(tags=["URL"])
+class ProbeViewSet(mixins.ListModelMixin, viewsets.GenericViewSet):
+    queryset = models.Probe.objects.all()
+    filterset_class = filters.ProbeFilter
+    serializer_class = serializers.ProbeSerializer
+    lookup_value_regex = "[^/]+"
+    pagination_class = PromgenPagination
+    permission_classes = [permissions.ReadOnlyForAuthenticatedUserOrIsSuperuser]
+
+
+@extend_schema_view(
+    list=extend_schema(summary="List Groups", description="Retrieve a list of all groups."),
+    retrieve=extend_schema(
+        summary="Retrieve Group",
+        description="Retrieve detailed information about a specific group.",
+    ),
+    create=extend_schema(summary="Create Group", description="Create a new group."),
+    update=extend_schema(summary="Update Group", description="Update an existing group."),
+    partial_update=extend_schema(
+        summary="Partially Update Group", description="Partially update an existing group."
+    ),
+    destroy=extend_schema(summary="Delete Group", description="Delete an existing group."),
+)
+@extend_schema(tags=["Group"])
+class GroupViewSet(viewsets.ModelViewSet):
+    queryset = models.Group.objects.all()
+    filterset_class = filters.GroupFilter
+    serializer_class = serializers.GroupRetrieveSerializer
+    lookup_value_regex = "[^/]+"
+    lookup_field = "id"
+    pagination_class = PromgenPagination
+    permission_classes = [permissions.PromgenGuardianRestPermission]
+
+    def get_action_permissions(self):
+        action_map = {
+            "retrieve": GROUP_MEMBER_AND_HIGHER_PERMS,
+            "update": ["group_admin"],
+            "partial_update": ["group_admin"],
+            "destroy": ["group_admin"],
+            "members": GROUP_MEMBER_AND_HIGHER_PERMS,
+            "add_members": ["group_admin"],
+            "update_member": ["group_admin"],
+            "remove_member": ["group_admin"],
+            "resources": GROUP_MEMBER_AND_HIGHER_PERMS,
+        }
+        return action_map.get(self.action, [])
+
+    def get_queryset(self):
+        if self.request.user.is_superuser or self.action != "list":
+            return self.queryset
+        return permissions.get_accessible_groups_for_user(self.request.user)
+
+    def perform_create(self, serializer):
+        group = serializer.save()
+        # Assign the user who created the group as the first admin of the group
+        group.user_set.add(self.request.user)
+        assign_perm("group_admin", self.request.user, group)
+
+    @extend_schema(
+        summary="List Members",
+        description="Retrieve a list of all members in the specific group.",
+        responses=serializers.UserWithPermRetrieveSerializer(many=True),
+    )
+    @action(detail=True, methods=["get"], url_path="members")
+    def members(self, request, id):
+        group = self.get_object()
+
+        users_with_perm = shortcuts.get_users_roles(group)
+        members = []
+        for user, perm in users_with_perm:
+            members.append(
+                {
+                    "id": user.id,
+                    "username": user.username,
+                    "email": user.email,
+                    "role": perm[0].upper(),
+                }
+            )
+
+        page = self.paginate_queryset(members)
+        return self.get_paginated_response(
+            serializers.UserWithPermRetrieveSerializer(page, many=True).data
+        )
+
+    @extend_schema(
+        summary="Add Members",
+        description="Add list of members to the group.",
+        request=serializers.AddMemberGroupSerializer,
+        responses={204: None},
+    )
+    @members.mapping.post
+    def add_members(self, request, id):
+        group = self.get_object()
+        serializer = serializers.AddMemberGroupSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+
+        already_members = User.objects.filter(
+            Q(id__in=serializer.validated_data["user_ids"])
+            & Q(id__in=group.user_set.values_list("id", flat=True))
+        )
+        new_members = User.objects.filter(id__in=serializer.validated_data["user_ids"]).exclude(
+            id__in=group.user_set.values_list("id", flat=True)
+        )
+
+        if already_members.exists():
+            raise ValidationError(
+                {
+                    "detail": "Users are already members of Group {group}: {users}".format(
+                        group=group.name,
+                        users=[user.username for user in already_members],
+                    )
+                }
+            )
+
+        if new_members.exists():
+            content_type = ContentType.objects.get_for_model(group)
+            permission = content_type.model + "_" + serializer.validated_data["group_role"].lower()
+            for user in new_members:
+                group.user_set.add(user)
+                assign_perm(permission, user, group)
+
+        return Response(status=HTTPStatus.NO_CONTENT)
+
+    @extend_schema(exclude=True)
+    @action(
+        detail=True,
+        methods=["get"],
+        url_path=r"members/(?P<user_id>\d+)",
+        pagination_class=None,
+        filterset_class=None,
+    )
+    def member(self, request, id, user_id):
+        raise MethodNotAllowed(request.method)
+
+    @extend_schema(
+        summary="Update Member",
+        description="Change role of a member in the group.",
+        request=serializers.UpdateMemberGroupSerializer,
+        responses={204: None},
+    )
+    @member.mapping.put
+    def update_member(self, request, id, user_id):
+        group = self.get_object()
+        user = User.objects.get(id=user_id)
+        serializer = serializers.UpdateMemberGroupSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+
+        if group.user_set.filter(pk=user.pk).exists():
+            content_type = ContentType.objects.get_for_model(group)
+            permission = content_type.model + "_" + serializer.validated_data["group_role"].lower()
+            assign_perm(permission, user, group)
+        else:
+            raise ValidationError({"detail": f"User {user.id} is not a member of the group"})
+
+        return Response(status=HTTPStatus.NO_CONTENT)
+
+    @extend_schema(
+        summary="Remove Member",
+        description="Remove a member from the group.",
+        responses={204: None},
+    )
+    @member.mapping.delete
+    def remove_member(self, request, id, user_id):
+        group = self.get_object()
+        user = User.objects.get(id=user_id)
+
+        if group.user_set.filter(pk=user.pk).exists():
+            permissions = get_perms(user, group)
+            for perm in permissions:
+                remove_perm(perm, user, group)
+            group.user_set.remove(user)
+        else:
+            raise ValidationError({"detail": f"User {user.id} is not a member of the group."})
+
+        return Response(status=HTTPStatus.NO_CONTENT)
+
+    @extend_schema(
+        summary="List Assigned Resources",
+        description="Retrieve a list of all resources assigned with the specific group.",
+        responses=serializers.GroupAssignedResourceSerializer(many=True),
+    )
+    @action(detail=True, methods=["get"], url_path="resources")
+    def resources(self, request, id):
+        group = self.get_object()
+
+        resources = GroupObjectPermission.objects.filter(group=group)
+        assigned_resources = []
+        for resource in resources:
+            assigned_resources.append(
+                {
+                    "content_type": resource.content_type.model,
+                    "object_id": resource.content_object.id,
+                    "name": resource.content_object.name,
+                    "role": resource.permission.codename.split("_")[1].upper(),
+                }
+            )
+
+        page = self.paginate_queryset(assigned_resources)
+        return self.get_paginated_response(
+            serializers.GroupAssignedResourceSerializer(page, many=True).data
+        )
+
+
+@extend_schema_view(
+    list=extend_schema(summary="List Projects", description="Retrieve a list of all projects."),
+    retrieve=extend_schema(
+        summary="Retrieve Project",
+        description="Retrieve detailed information about a specific project.",
+    ),
+    update=extend_schema(summary="Update Project", description="Update an existing project."),
+    partial_update=extend_schema(
+        summary="Partially Update Project", description="Partially update an existing project."
+    ),
+    destroy=extend_schema(summary="Delete Project", description="Delete an existing project."),
+)
+@extend_schema(tags=["Project"])
+class ProjectViewSet(
+    PermissionManagementMixin,
+    RuleMixin,
+    NotifierMixin,
+    mixins.ListModelMixin,
+    mixins.RetrieveModelMixin,
+    mixins.UpdateModelMixin,
+    mixins.DestroyModelMixin,
+    viewsets.GenericViewSet,
+):
+    queryset = models.Project.objects.all()
+    filterset_class = filters.ProjectFilter
+    lookup_value_regex = "[^/]+"
+    lookup_field = "id"
+    pagination_class = PromgenPagination
+    permission_classes = [permissions.PromgenGuardianRestPermission]
+
+    def get_action_permissions(self):
+        action_map = {
+            "retrieve": PROJECT_VIEWER_AND_HIGHER_PERMS,
+            "update": PROJECT_EDITOR_AND_HIGHER_PERMS,
+            "partial_update": PROJECT_EDITOR_AND_HIGHER_PERMS,
+            "destroy": PROJECT_ADMIN_AND_HIGHER_PERMS,
+            "users": PROJECT_VIEWER_AND_HIGHER_PERMS,
+            "assign_user": PROJECT_ADMIN_AND_HIGHER_PERMS,
+            "remove_user": PROJECT_ADMIN_AND_HIGHER_PERMS,
+            "groups": PROJECT_VIEWER_AND_HIGHER_PERMS,
+            "assign_group": PROJECT_ADMIN_AND_HIGHER_PERMS,
+            "remove_group": PROJECT_ADMIN_AND_HIGHER_PERMS,
+            "register_exporter": PROJECT_EDITOR_AND_HIGHER_PERMS,
+            "register_farm": PROJECT_EDITOR_AND_HIGHER_PERMS,
+            "register_url": PROJECT_EDITOR_AND_HIGHER_PERMS,
+            "register_notifier": PROJECT_EDITOR_AND_HIGHER_PERMS,
+            "register_rule": PROJECT_EDITOR_AND_HIGHER_PERMS,
+            "override_rule": PROJECT_EDITOR_AND_HIGHER_PERMS,
+        }
+        return action_map.get(self.action, [])
+
+    def get_queryset(self):
+        if self.request.user.is_superuser or self.action != "list":
+            return self.queryset
+        return permissions.get_accessible_projects_for_user(self.request.user)
+
+    def get_serializer_class(self):
+        if self.action == "retrieve":
+            return serializers.ProjectRetrieveDetailSerializer
+        return serializers.ProjectSimpleSerializer
+
+    def perform_update(self, serializer):
+        project = self.get_object()
+        original_owner_id = project.owner_id
+        new_owner = serializer.validated_data.get("owner")
+        owner_changed = new_owner is not None and new_owner.id != original_owner_id
+        original_service_id = project.service_id
+        new_service = serializer.validated_data.get("service")
+        service_changed = new_service is not None and new_service.id != original_service_id
+
+        if owner_changed or service_changed:
+            if not (
+                self.request.user.is_superuser
+                or self.request.user == project.owner
+                or self.request.user == project.service.owner
+            ):
+                validation_errors = {}
+                if owner_changed:
+                    validation_errors["owner"] = "You do not have permission to change the owner."
+                if service_changed:
+                    validation_errors["service"] = (
+                        "You do not have permission to change the service."
+                    )
+                raise ValidationError(validation_errors)
+
+        super().perform_update(serializer)
+
+        if owner_changed:
+            assign_perm("project_admin", new_owner, project)
+
+    def destroy(self, request, *args, **kwargs):
+        project = self.get_object()
+        if (
+            not request.user.is_superuser
+            and project.owner != request.user
+            and project.service.owner != request.user
+        ):
+            raise PermissionDenied("Only the project or the service owner can delete the project.")
+        return super().destroy(request, *args, **kwargs)
+
+    # We let the GET method return MethodNotAllowed because we don't want to implement this API.
+    # However, we still need to define the function so that Django REST Framework can generate
+    # the correct URL patterns for the other related methods when using the decorator.
+    @extend_schema(exclude=True)
+    @action(detail=True, methods=["get"], url_path="exporters")
+    def exporters(self, request, id):
+        raise MethodNotAllowed(request.method)
+
+    @extend_schema(
+        summary="Register Exporter",
+        description="Register a new exporter for the specified project.",
+        request=serializers.RegisterExporterToProjectSerializer,
+        responses={201: serializers.ExporterRetrieveSerializer},
+    )
+    @exporters.mapping.post
+    def register_exporter(self, request, id):
+        project = self.get_object()
+        serializer = serializers.RegisterExporterToProjectSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+
+        attributes = {
+            "project_id": project.id,
+        }
+
+        for field in serializer.fields:
+            value = serializer.validated_data.get(field)
+            if value is not None:
+                attributes[field] = value
+
+        exporter, created = models.Exporter.objects.get_or_create(**attributes)
+        return Response(
+            serializers.ExporterRetrieveSerializer(exporter).data,
+            status=HTTPStatus.CREATED,
+        )
+
+    # We let the GET method return MethodNotAllowed because we don't want to implement this API.
+    # However, we still need to define the function so that Django REST Framework can generate
+    # the correct URL patterns for the other related methods when using the decorator.
+    @extend_schema(exclude=True)
+    @action(detail=True, methods=["get"], url_path="urls")
+    def urls(self, request, id):
+        raise MethodNotAllowed(request.method)
+
+    @extend_schema(
+        summary="Register URL",
+        description="Register a new URL for the specified project.",
+        request=serializers.RegisterURLToProjectSerializer,
+        responses={201: serializers.URLSerializer},
+    )
+    @urls.mapping.post
+    def register_url(self, request, id):
+        project = self.get_object()
+        serializer = serializers.RegisterURLToProjectSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+
+        url, created = models.URL.objects.get_or_create(
+            project=project,
+            url=serializer.validated_data["url"],
+            probe=serializer.validated_data["probe"],
+        )
+        return Response(serializers.URLSerializer(url).data, status=HTTPStatus.CREATED)
+
+    # We let the GET method return MethodNotAllowed because we don't want to implement this API.
+    # However, we still need to define the function so that Django REST Framework can generate
+    # the correct URL patterns for the other related methods when using the decorator.
+    @extend_schema(exclude=True)
+    @action(detail=True, methods=["get"], url_path="farms")
+    def farms(self, request, id, user_id):
+        raise MethodNotAllowed(request.method)
+
+    @extend_schema(
+        summary="Register Farm",
+        description="Register a new farm for the specified project.",
+        request=serializers.RegisterFarmToProjectSerializer,
+        responses={201: serializers.FarmRetrieveSerializer},
+    )
+    @farms.mapping.post
+    def register_farm(self, request, id):
+        project = self.get_object()
+        if hasattr(project, "farm"):
+            raise ValidationError({"detail": "Project already has a farm."})
+
+        serializer = serializers.RegisterFarmToProjectSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+
+        if serializer.validated_data["source"] == discovery.FARM_DEFAULT:
+            farm = self.register_local_farm(
+                serializer.validated_data["name"], serializer.validated_data["hosts"]
+            )
+        else:
+            farm = self.link_to_remote_farm(
+                serializer.validated_data["source"], serializer.validated_data["name"]
+            )
+
+        return Response(serializers.FarmRetrieveSerializer(farm).data, status=HTTPStatus.CREATED)
+
+    def register_local_farm(self, farm_name, hosts):
+        project = self.get_object()
+
+        valid_hosts = set()
+        invalid_hosts = set()
+        for hostname in hosts:
+            if hostname == "":
+                continue
+            try:
+                validators.hostname(hostname)
+            except DjangoValidationError:
+                invalid_hosts.add(hostname)
+            valid_hosts.add(hostname)
+
+        if invalid_hosts:
+            raise ValidationError(
+                {"detail": "Invalid hostnames.", "extras": {"invalid_hosts": list(invalid_hosts)}}
+            )
+
+        farm, created = models.Farm.objects.get_or_create(
+            project=project,
+            name=farm_name,
+            source=discovery.FARM_DEFAULT,
+        )
+
+        for valid_host in valid_hosts:
+            models.Host.objects.get_or_create(name=valid_host, farm_id=farm.pk)
+
+        return farm
+
+    def link_to_remote_farm(self, source, farm_name):
+        project = self.get_object()
+
+        driver = None
+        for driver_name, farm_driver in models.Farm.driver_set():
+            if driver_name == source:
+                driver = farm_driver
+                break
+
+        if driver is None:
+            raise ValidationError({"source": "Unknown farm source."})
+
+        if farm_name not in set(models.Farm.fetch(source)):
+            raise ValidationError({"farm": "Unknown farm."})
+
+        farm, created = models.Farm.objects.get_or_create(
+            name=farm_name,
+            source=source,
+            project=project,
+        )
+        if created:
+            farm.refresh()
+        project.farm = farm
+        project.save()
+        return farm
+
+
+@extend_schema_view(
+    list=extend_schema(
+        summary="List Services",
+        description="Retrieve a list of all services.",
+    ),
+    retrieve=extend_schema(
+        summary="Retrieve Service",
+        description="Retrieve detailed information about a specific service.",
+    ),
+    create=extend_schema(summary="Register Service", description="Create a new service."),
+    update=extend_schema(summary="Update Service", description="Update an existing service."),
+    partial_update=extend_schema(
+        summary="Partially Update Service", description="Partially update an existing service."
+    ),
+    destroy=extend_schema(summary="Delete Service", description="Delete an existing service."),
+)
+@extend_schema(tags=["Service"])
+class ServiceViewSet(
+    NotifierMixin,
+    RuleMixin,
+    PermissionManagementMixin,
+    viewsets.ModelViewSet,
+):
+    queryset = models.Service.objects.all()
+    filterset_class = filters.ServiceFilter
+    lookup_value_regex = "[^/]+"
+    lookup_field = "id"
+    pagination_class = PromgenPagination
+    permission_classes = [permissions.PromgenGuardianRestPermission]
+
+    def get_action_permissions(self):
+        action_map = {
+            "retrieve": SERVICE_VIEWER_AND_HIGHER_PERMS,
+            "update": SERVICE_EDITOR_AND_HIGHER_PERMS,
+            "partial_update": SERVICE_EDITOR_AND_HIGHER_PERMS,
+            "destroy": ["service_admin"],
+            "users": SERVICE_VIEWER_AND_HIGHER_PERMS,
+            "assign_user": ["service_admin"],
+            "remove_user": ["service_admin"],
+            "groups": SERVICE_VIEWER_AND_HIGHER_PERMS,
+            "assign_group": ["service_admin"],
+            "remove_group": ["service_admin"],
+            "register_project": SERVICE_EDITOR_AND_HIGHER_PERMS,
+            "register_notifier": SERVICE_EDITOR_AND_HIGHER_PERMS,
+            "register_rule": SERVICE_EDITOR_AND_HIGHER_PERMS,
+            "override_rule": SERVICE_EDITOR_AND_HIGHER_PERMS,
+        }
+        return action_map.get(self.action, [])
+
+    def get_queryset(self):
+        if self.request.user.is_superuser or self.action != "list":
+            return self.queryset
+        return permissions.get_accessible_services_for_user(self.request.user)
+
+    def get_serializer_class(self):
+        if self.action == "retrieve":
+            return serializers.ServiceRetrieveDetailSerializer
+        if self.action == "create":
+            return serializers.RegisterServiceSerializer
+        return serializers.ServiceRetrieveSimpleSerializer
+
+    def perform_create(self, serializer):
+        serializer.save(owner=self.request.user)
+
+    def perform_update(self, serializer):
+        service = self.get_object()
+        original_owner_id = service.owner_id
+        new_owner = serializer.validated_data.get("owner")
+        owner_changed = new_owner is not None and new_owner.id != original_owner_id
+
+        if owner_changed and not (
+            self.request.user.is_superuser or self.request.user.id == original_owner_id
+        ):
+            raise ValidationError({"owner": "You do not have permission to change the owner."})
+
+        super().perform_update(serializer)
+
+        if owner_changed:
+            assign_perm("service_admin", new_owner, service)
+
+    def destroy(self, request, *args, **kwargs):
+        service = self.get_object()
+        if not request.user.is_superuser and service.owner != request.user:
+            raise PermissionDenied("Only the service owner can delete the service.")
+        return super().destroy(request, *args, **kwargs)
+
+    # We let the GET method return MethodNotAllowed because we don't want to implement this API.
+    # However, we still need to define the function so that Django REST Framework can generate
+    # the correct URL patterns for the other related methods when using the decorator.
+    @extend_schema(exclude=True)
+    @action(detail=True, methods=["get"], url_path="project")
+    def projects(self, request, id):
+        raise MethodNotAllowed(request.method)
+
+    @extend_schema(
+        summary="Register Project",
+        description="Register a new project for the specified service.",
+        request=serializers.RegisterProjectToServiceSerializer,
+        responses={201: serializers.ProjectSimpleSerializer},
+    )
+    @projects.mapping.post
+    def register_project(self, request, id):
+        service = self.get_object()
+        serializer = serializers.RegisterProjectToServiceSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+
+        attributes = {"service": service, "owner_id": request.user.id}
+
+        for field in serializer.fields:
+            value = serializer.validated_data.get(field)
+            if value is not None:
+                attributes[field] = value
+
+        project = serializer.create(attributes)
+        return Response(
+            serializers.ProjectSimpleSerializer(project).data, status=HTTPStatus.CREATED
+        )
+
+
+@extend_schema_view(
+    list=extend_schema(summary="List Users", description="Retrieve a list of all users."),
+)
+@extend_schema(tags=["User"])
+class UserViewSet(mixins.ListModelMixin, viewsets.GenericViewSet):
+    queryset = (
+        User.objects.filter(is_active=True)
+        .exclude(username=ANONYMOUS_USER_NAME)
+        .order_by("username")
+    )
+    filterset_class = filters.UserFilter
+    serializer_class = serializers.UserRetrieveSimpleSerializer
+    lookup_value_regex = "[^/]+"
+    pagination_class = PromgenPagination
+    permission_classes = [permissions.PromgenGuardianRestPermission]
+
+    @extend_schema(
+        summary="Get Current User",
+        description="Retrieve the current authenticated user's information.",
+        responses=serializers.UserRetrieveDetailSerializer,
+    )
+    @action(detail=False, methods=["get"], url_path="me")
+    def get_current_user(self, request):
+        return Response(serializers.UserRetrieveDetailSerializer(request.user).data)
+
+    @extend_schema(
+        summary="Register User's Notifier",
+        description="Register a new notifier for the current user.",
+        request=serializers.RegisterNotifierSerializer,
+        responses={201: serializers.NotifierSerializer},
+    )
+    @action(detail=False, methods=["post"], url_path="me/notifiers")
+    def register_user_notifier(self, request):
+        serializer = serializers.RegisterNotifierSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+
+        if serializer.validated_data.get("sender") == "promgen.notification.user":
+            return Response(
+                {"detail": "Cannot register a promgen.notification.user notifier for a user."},
+                status=HTTPStatus.BAD_REQUEST,
+            )
+
+        notifier = _create_notifier(request, request.user)
+        return Response(
+            serializers.NotifierSerializer(notifier).data,
+            status=HTTPStatus.CREATED,
+        )
+
+    @extend_schema(
+        summary="Get Current User Tokens",
+        description="Retrieve a list of current authenticated user's tokens.",
+        responses=serializers.TokenRetrieveSerializer(many=True),
+    )
+    @action(detail=False, methods=["get"], url_path="me/tokens", filterset_class=None)
+    def current_user_tokens(self, request):
+        tokens = models.AuthToken.objects.filter(user=request.user)
+        page = self.paginate_queryset(tokens)
+        return self.get_paginated_response(
+            serializers.TokenRetrieveSerializer(page, many=True).data
+        )
+
+    @extend_schema(
+        summary="Create User Token",
+        description="Create a new API token for current authenticated user.",
+        request=serializers.TokenCreateRequestSerializer,
+        responses=serializers.TokenCreateResponseSerializer,
+    )
+    @current_user_tokens.mapping.post
+    def create_token_for_current_user(self, request):
+        existing_tokens = models.AuthToken.objects.filter(user=self.request.user).count()
+        if settings.API_TOKEN_MAX_QUOTA and existing_tokens >= settings.API_TOKEN_MAX_QUOTA:
+            raise ValidationError(
+                {
+                    "detail": (
+                        "You have reached the maximum number of API tokens allowed "
+                        f"({settings.API_TOKEN_MAX_QUOTA}). Please delete an existing token before "
+                        "creating a new one."
+                    )
+                }
+            )
+
+        serializer = serializers.TokenCreateRequestSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+
+        if serializer.validated_data.get("name"):
+            name = serializer.validated_data["name"]
+        else:
+            name = f"{request.user.username}-{uuid.uuid4()}"
+
+        expiry = None
+        if serializer.validated_data.get("days_to_live"):
+            expiry = datetime.timedelta(days=serializer.validated_data["days_to_live"])
+        instance, token = models.AuthToken.objects.create(
+            user=self.request.user, name=name, expiry=expiry
+        )
+
+        return Response(
+            serializers.TokenCreateResponseSerializer({"name": instance.name, "token": token}).data,
+            status=HTTPStatus.CREATED,
+        )
+
+    # We let the GET method return MethodNotAllowed because we don't want to implement this API.
+    # However, we still need to define the function so that Django REST Framework can generate
+    # the correct URL patterns for the other related methods when using the decorator.
+    @extend_schema(exclude=True)
+    @action(detail=False, methods=["get"], url_path=r"me/tokens/(?P<digest>[0-9a-f]+)")
+    def current_user_token(self, request, id, digest):
+        raise MethodNotAllowed(request.method)
+
+    @extend_schema(
+        summary="Delete User Tokens",
+        description="Delete an existing API token of current authenticated user.",
+    )
+    @current_user_token.mapping.delete
+    def delete_token_of_current_user(self, request, digest):
+        models.AuthToken.objects.filter(digest=digest, user=self.request.user).delete()
+        return Response(status=HTTPStatus.NO_CONTENT)
+
+
+@extend_schema_view(
+    list=extend_schema(summary="List Shards", description="Retrieve a list of all shards."),
+    retrieve=extend_schema(
+        summary="Retrieve Shard",
+        description="Retrieve detailed information about a specific shard.",
+    ),
+)
+@extend_schema(tags=["Shard"])
+class ShardViewSet(mixins.RetrieveModelMixin, mixins.ListModelMixin, viewsets.GenericViewSet):
+    queryset = models.Shard.objects.all()
+    filterset_class = filters.ShardFilter
+    serializer_class = serializers.ShardRetrieveDetailSerializer
+    lookup_value_regex = "[^/]+"
+    lookup_field = "id"
+    pagination_class = PromgenPagination
+
+
+@extend_schema(tags=["Site"])
+class SiteViewSet(RuleMixin, viewsets.GenericViewSet):
+    queryset = models.Site.objects.all()
+    lookup_value_regex = "[^/]+"
+    lookup_field = "id"
+    pagination_class = PromgenPagination
+    permission_classes = [permissions.PromgenGuardianRestPermission]
+
+    @extend_schema(
+        summary="Get Current Site",
+        description="Retrieve the current site's information.",
+        responses=serializers.SiteRetrieveSerializer,
+    )
+    @action(detail=False, methods=["get"], url_path="info")
+    def get_current_site(self, request):
+        current_site = models.Site.objects.get_current()
+        return Response(serializers.SiteRetrieveSerializer(current_site).data)
+
+    @extend_schema(exclude=True)
+    def override_rule(self, request, id):
+        raise NotFound()

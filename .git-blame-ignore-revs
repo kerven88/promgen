@@ -1,2 +1,14 @@
 # pyupgrade --py36-plus promgen/**/*.py
 4d53038426aedf2abf337a2876d0d6ceccefc09b
+# black
+a81731039c118543398c90869e608dde0acaf32c
+# ruff
+af2c352786f952d819e69b928bf6c99dcde5954b
+# Compile requirements to update comments
+5821434b42203b1080dcdc480d1ffcf07fe53a90
+# Format with Ruff
+e72aba6d7e5891ac777f533eef6f7520410c9e0b
+# Format and remove unused imports with Ruff
+5b3d0c07b222ed9f01429f330e5f97e9734b1467
+# Fix errors with Ruff
+2c540870b9a7325fa178f019080533b4f475081c

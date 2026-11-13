@@ -3,15 +3,15 @@
 from unittest import mock
 
 import requests
-
 from django.test import override_settings
 from django.urls import reverse
 
-from promgen import models, views, tests
+from promgen import models, tests, views
+from promgen.middleware import get_current_user
 
-TEST_SETTINGS = tests.Data('examples', 'promgen.yml').yaml()
-TEST_IMPORT = tests.Data('examples', 'import.json').raw()
-TEST_REPLACE = tests.Data('examples', 'replace.json').raw()
+TEST_SETTINGS = tests.Data("examples", "promgen.yml").yaml()
+TEST_IMPORT = tests.Data("examples", "import.json").raw()
+TEST_REPLACE = tests.Data("examples", "replace.json").raw()
 
 
 class RouteTests(tests.PromgenTest):
@@ -20,8 +20,8 @@ class RouteTests(tests.PromgenTest):
 
     @override_settings(PROMGEN=TEST_SETTINGS)
     @override_settings(CELERY_TASK_ALWAYS_EAGER=True)
-    @mock.patch('promgen.signals._trigger_write_config')
-    @mock.patch('promgen.tasks.reload_prometheus')
+    @mock.patch("promgen.signals._trigger_write_config")
+    @mock.patch("promgen.tasks.reload_prometheus")
     def test_import(self, mock_write, mock_reload):
         self.add_user_permissions(
             "promgen.change_rule", "promgen.change_site", "promgen.change_exporter"
@@ -31,8 +31,8 @@ class RouteTests(tests.PromgenTest):
         self.assertRoute(response, views.Import, 302, "Redirect to imported object")
         self.assertCount(models.Service, 3, "Import one service (Fixture has two services)")
         self.assertCount(models.Project, 4, "Import two projects")
-        self.assertCount(models.Exporter, 2, "Import two exporters")
-        self.assertCount(models.Host, 3, "Import three hosts")
+        self.assertCount(models.Exporter, 4, "Import two more exporters")
+        self.assertCount(models.Host, 4, "Import three hosts (Fixture has one host)")
 
     @override_settings(PROMGEN=TEST_SETTINGS)
     @override_settings(CELERY_TASK_ALWAYS_EAGER=True)
@@ -51,19 +51,21 @@ class RouteTests(tests.PromgenTest):
 
         self.assertCount(models.Service, 3, "Import one service (Fixture has two services)")
         self.assertCount(models.Project, 4, "Import two projects (Fixture has 2 projectsa)")
-        self.assertCount(models.Exporter, 2, "Import two exporters")
-        self.assertCount(models.Farm, 4, "Original two farms and one new farm (fixture has one farm)")
-        self.assertCount(models.Host, 5, "Original 3 hosts and two new ones")
+        self.assertCount(models.Exporter, 4, "Import two more exporters")
+        self.assertCount(
+            models.Farm, 4, "Original three farms and one new farm (fixture has two farms)"
+        )
+        self.assertCount(models.Host, 6, "Original 4 hosts and two new ones")
 
     @mock.patch("requests.get")
     def test_scrape(self, mock_get):
         shard = models.Shard.objects.create(name="test_scrape_shard")
-        service = models.Service.objects.create(name="test_scrape_service")
-        farm = models.Farm.objects.create(name="test_scrape_farm")
-        farm.host_set.create(name="example.com")
+        service = models.Service.objects.create(name="test_scrape_service", owner=self.user)
         project = models.Project.objects.create(
-            name="test_scrape_project", service=service, shard=shard, farm=farm
+            name="test_scrape_project", service=service, shard=shard, owner=self.user
         )
+        farm = models.Farm.objects.create(name="test_scrape_farm", project=project)
+        farm.host_set.create(name="example.com")
 
         # Uses the scrape target as the key, and the POST body that should
         # result in that URL
@@ -91,9 +93,7 @@ class RouteTests(tests.PromgenTest):
 
             # For each POST body, check to see that we generate and attempt to
             # scrape the correct URL
-            response = self.client.post(
-                reverse("exporter-scrape", kwargs={"pk": project.pk}), body
-            )
+            response = self.client.post(reverse("exporter-scrape", kwargs={"pk": project.pk}), body)
             self.assertRoute(response, views.ExporterScrape, 200)
             self.assertEqual(mock_get.call_args[0][0], url)
 
@@ -105,7 +105,11 @@ class RouteTests(tests.PromgenTest):
             self.assertTrue(response.url.startswith("/login"))
 
     def test_other_routes(self):
-        self.add_user_permissions("promgen.add_rule", "promgen.change_site")
+        user = get_current_user()
+        user.is_superuser = True
+        user.save()
         for request in [{"viewname": "rule-new", "args": ("site", 1)}]:
             response = self.client.get(reverse(**request))
             self.assertRoute(response, views.AlertRuleRegister, 200)
+        user.is_superuser = False
+        user.save()

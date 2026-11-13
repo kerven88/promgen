@@ -10,9 +10,9 @@
 
 {% breadcrumb label="Farms" %}
 
-{% include "promgen/pagination.html" %}
+{% include "promgen/pagination_short.html" %}
 
-<div class="panel panel-default">
+<div class="panel panel-default" v-pre>
   <table class="table table-bordered table-condensed">
     <thead>
       <tr>
@@ -20,7 +20,7 @@
         <th>Source</th>
         <th>Hosts</th>
         <th>Project</th>
-        <th>&nbsp;</th>
+        <th>Actions</th>
       </tr>
     </thead>
     {% for farm in farm_list %}
@@ -40,11 +40,7 @@
         </ul>
       </td>
       <td>
-        <ul>
-          {% for project in farm.project_set.all %}
-          <li><a href="{% url 'project-detail' project.id %}">{{ project.name }}</a></li>
-          {% endfor %}
-        </ul>
+          <a href="{% url 'project-detail' farm.project.id %}">{{ farm.project.name }}</a>
       </td>
       <td>
         {% if farm.driver.remote %}
@@ -53,16 +49,19 @@
           <button class="btn btn-warning">{% trans "Convert to Local Farm" %}</button>
         </form>
         {% endif %}
+        {% current_role farm.project as role %}
+        {% if role == "ADMIN" or role == "EDIT" %}
         <form method="post" action="{% url 'farm-delete' farm.id %}" onsubmit="return confirm('Delete this farm?')" style="display: inline">
           {% csrf_token %}
           <button class="btn btn-danger">{% trans "Delete" %}</button>
         </form>
+        {% endif %}
       </td>
     </tr>
     {% endfor %}
   </table>
 </div>
 
-{% include "promgen/pagination.html" %}
+{% include "promgen/pagination_short.html" %}
 
 {% endblock %}

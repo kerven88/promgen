@@ -9,6 +9,8 @@ Installing Promgen
   /conf/alert
   /conf/docker
   /conf/django
+  /conf/api
+  /conf/notification
 
 
 .. image:: /images/overview.png

@@ -4,43 +4,29 @@
 import concurrent.futures
 import json
 import logging
-from urllib.parse import urljoin
+from http import HTTPStatus
 
 import requests
-from dateutil import parser
-from django.conf import settings
+from django.contrib.auth.mixins import LoginRequiredMixin
 from django.http import HttpResponse, JsonResponse
-from django.template import defaultfilters
-from django.views.generic import View
+from django.utils.translation import gettext as _
 from django.views.generic.base import TemplateView
-from promgen import forms, models, prometheus, util
 from requests.exceptions import HTTPError
+from rest_framework import permissions
+from rest_framework.views import APIView
+
+from promgen import forms, models, prometheus, serializers, util
+from promgen import permissions as promgen_permissions
 
 logger = logging.getLogger(__name__)
 
 
-def proxy_error(response):
-    """
-    Return a wrapped proxy error
-
-    Taking a request.response object as input, return it slightly modified
-    with an extra header for debugging so that we can see where the request
-    failed
-    """
-    r = HttpResponse(
-        response.content,
-        content_type=response.headers["content-type"],
-        status=response.status_code,
-    )
-    r.setdefault("X-PROMGEN-PROXY", response.url)
-    return r
-
-
-class PrometheusProxy(View):
+class PrometheusProxy(APIView):
+    permission_classes = [permissions.IsAuthenticated]
     proxy_headers = {"HTTP_REFERER": "Referer"}
 
     @property
-    def headers(self):
+    def request_headers(self):
         # Loop through the headers from our request, and decide which ones
         # we should pass through upstream. Currently, our 'Referer' header is
         # the main one we are interested in, since this can help us debug which
@@ -54,18 +40,21 @@ class PrometheusProxy(View):
     def proxy(self, request):
         futures = []
         with concurrent.futures.ThreadPoolExecutor(max_workers=20) as executor:
-            for host in models.Shard.objects.filter(proxy=True):
+            for shard in models.Shard.objects.filter(proxy=True):
+                headers = self.request_headers
+                if shard.authorization:
+                    headers["Authorization"] = shard.authorization
                 futures.append(
                     executor.submit(
                         util.get,
-                        urljoin(host.url, request.get_full_path_info()),
-                        headers=self.headers,
+                        util.join_url(shard.url, request.get_full_path_info()),
+                        headers=headers,
                     )
                 )
             yield from concurrent.futures.as_completed(futures)
 
 
-class ProxyGraph(TemplateView):
+class ProxyGraph(LoginRequiredMixin, TemplateView):
     template_name = "promgen/graph.html"
 
     def get_context_data(self, **kwargs):
@@ -89,7 +78,7 @@ class ProxyLabels(PrometheusProxy):
                 data.update(_json["data"])
             except HTTPError:
                 logger.warning("Error with response")
-                return proxy_error(result)
+                return util.proxy_error(result)
 
         return JsonResponse({"status": "success", "data": sorted(data)})
 
@@ -106,7 +95,7 @@ class ProxyLabelValues(PrometheusProxy):
                 data.update(_json["data"])
             except HTTPError:
                 logger.warning("Error with response")
-                return proxy_error(result)
+                return util.proxy_error(result)
 
         return JsonResponse({"status": "success", "data": sorted(data)})
 
@@ -123,7 +112,7 @@ class ProxySeries(PrometheusProxy):
                 data += _json["data"]
             except HTTPError:
                 logger.warning("Error with response")
-                return proxy_error(result)
+                return util.proxy_error(result)
 
         return JsonResponse({"status": "success", "data": data})
 
@@ -141,7 +130,7 @@ class ProxyQueryRange(PrometheusProxy):
                 data += _json["data"]["result"]
                 resultType = _json["data"]["resultType"]
             except HTTPError:
-                return proxy_error(result)
+                return util.proxy_error(result)
 
         return JsonResponse(
             {"status": "success", "data": {"resultType": resultType, "result": data}}
@@ -161,40 +150,168 @@ class ProxyQuery(PrometheusProxy):
                 data += _json["data"]["result"]
                 resultType = _json["data"]["resultType"]
             except HTTPError:
-                return proxy_error(result)
+                return util.proxy_error(result)
 
         return JsonResponse(
             {"status": "success", "data": {"resultType": resultType, "result": data}}
         )
 
 
-class ProxyAlerts(View):
+class ProxyAlerts(APIView):
+    permission_classes = [permissions.IsAuthenticated]
+
     def get(self, request):
         try:
-            url = urljoin(util.setting("alertmanager:url"), "/api/v1/alerts")
+            url = util.join_url(util.setting("alertmanager:url"), "/api/v2/alerts")
             response = util.get(url)
         except requests.exceptions.ConnectionError:
             logger.error("Error connecting to %s", url)
-            return JsonResponse({})
+            return JsonResponse({}, status=HTTPStatus.INTERNAL_SERVER_ERROR)
         else:
-            return HttpResponse(response.content, content_type="application/json")
+            filtered_response = response.json()
+            # Filter the alerts based on the user's permissions
+            if not self.request.user.is_superuser:
+                services = promgen_permissions.get_accessible_services_for_user(self.request.user)
+                projects = promgen_permissions.get_accessible_projects_for_user(self.request.user)
+
+                accessible_projects = projects.values_list("name", flat=True)
+                accessible_services = services.values_list("name", flat=True)
+
+                filtered_response = [
+                    alert
+                    for alert in filtered_response
+                    if alert.get("labels", {}).get("service") in accessible_services
+                    or alert.get("labels", {}).get("project") in accessible_projects
+                ]
+
+            filtered_response = self.check_alert_labels(filtered_response)
+
+            return HttpResponse(json.dumps(filtered_response), content_type="application/json")
+
+    @staticmethod
+    def check_alert_labels(alerts):
+        """
+        Check for service and project labels.
+
+        Check if service and project labels are invalid. If so, set warning messages to
+        the "promgen.warnings" field of the corresponding alert in the response so that
+        the frontend can display them to the user.
+        """
+        checked_alerts = []
+        for alert in alerts:
+            labels = alert.get("labels", {})
+            service_name = labels.get("service")
+            project_name = labels.get("project")
+
+            def set_warning(message):
+                if "promgen" not in alert:
+                    alert["promgen"] = {}
+                if "warnings" not in alert["promgen"]:
+                    alert["promgen"]["warnings"] = []
+                alert["promgen"]["warnings"].append(message)
+
+            # If both service and project labels exist, verify their relationship
+            if service_name and project_name:
+                try:
+                    project = models.Project.objects.get(name=project_name)
+                    # Check if the project's service matches the service label
+                    if project.service.name != service_name:
+                        logger.warning(
+                            "Alert has mismatched service and project labels: "
+                            "service=%s, project=%s (belongs to service=%s)",
+                            service_name,
+                            project_name,
+                            project.service.name,
+                        )
+                        set_warning(
+                            "The 'service' and 'project' labels do not match. "
+                            "This alert may originate from an unrelated Alert Rule."
+                        )
+                except models.Project.DoesNotExist:
+                    logger.warning("Project %s from alert labels not found", project_name)
+                    set_warning("Project from alert's labels is not found.")
+
+            checked_alerts.append(alert)
+
+        return checked_alerts
 
 
-class ProxySilences(View):
+def get_affected_obj_by_matchers(matchers):
+    def get_queryset_for_matcher(matcher, klass):
+        if matcher["isEqual"] and matcher["isRegex"]:  # =~
+            return klass.objects.filter(name__regex="^(?:" + matcher["value"] + ")$")
+        elif matcher["isEqual"]:  # =
+            return klass.objects.filter(name=matcher["value"])
+        elif matcher["isRegex"]:  # !~
+            return klass.objects.exclude(name__regex="^(?:" + matcher["value"] + ")$")
+        else:  # !=
+            return klass.objects.exclude(name=matcher["value"])
+
+    affected_projects = models.Project.objects.all()
+    affected_services = models.Service.objects.all()
+    has_project_matcher = has_service_matcher = False
+
+    for matcher in matchers:
+        if matcher["name"] == "project":
+            has_project_matcher = True
+            qs = get_queryset_for_matcher(matcher, models.Project)
+            affected_projects = affected_projects.filter(id__in=qs.values_list("id", flat=True))
+        elif matcher["name"] == "service":
+            has_service_matcher = True
+            qs = get_queryset_for_matcher(matcher, models.Service)
+            affected_services = affected_services.filter(id__in=qs.values_list("id", flat=True))
+
+    if not has_project_matcher:
+        affected_projects = models.Project.objects.none()
+    if not has_service_matcher:
+        affected_services = models.Service.objects.none()
+
+    return affected_projects, affected_services
+
+
+class ProxySilences(APIView):
+    permission_classes = [permissions.IsAuthenticated]
+
     def get(self, request):
         try:
-            url = urljoin(util.setting("alertmanager:url"), "/api/v1/silences")
+            url = util.join_url(util.setting("alertmanager:url"), "/api/v2/silences")
             response = util.get(url, params={"silenced": False})
         except requests.exceptions.ConnectionError:
             logger.error("Error connecting to %s", url)
-            return JsonResponse({})
+            return JsonResponse({}, status=HTTPStatus.INTERNAL_SERVER_ERROR)
         else:
+            # Filter the silences based on the user's permissions
+            if not self.request.user.is_superuser:
+                accessible_projects = promgen_permissions.get_accessible_projects_for_user(
+                    self.request.user
+                )
+                accessible_services = promgen_permissions.get_accessible_services_for_user(
+                    self.request.user
+                )
+
+                filtered_silences = []
+                for silence in response.json():
+                    affected_projects, affected_services = get_affected_obj_by_matchers(
+                        silence.get("matchers", [])
+                    )
+                    if (
+                        affected_projects.filter(
+                            id__in=accessible_projects.values_list("id", flat=True)
+                        ).exists()
+                        or affected_services.filter(
+                            id__in=accessible_services.values_list("id", flat=True)
+                        ).exists()
+                    ):
+                        filtered_silences.append(silence)
+
+                return HttpResponse(json.dumps(filtered_silences), content_type="application/json")
+
             return HttpResponse(response.content, content_type="application/json")
 
     def post(self, request):
         body = json.loads(request.body.decode("utf-8"))
         body.setdefault("comment", "Silenced from Promgen")
-        body.setdefault("createdBy", request.user.email)
+        body.setdefault("createdBy", request.user.username)
 
         form = forms.SilenceForm(body)
         if not form.is_valid():
@@ -206,15 +323,66 @@ class ProxySilences(View):
                         for m in form.errors[k]
                     ]
                 },
-                status=422,
+                status=HTTPStatus.UNPROCESSABLE_ENTITY,
             )
 
+        # Check if the user has permission to silence the alert
+        if not request.user.is_superuser:
+            if "project" not in body["labels"] and "service" not in body["labels"]:
+                return JsonResponse(
+                    {
+                        "messages": [
+                            {
+                                "class": "alert alert-warning",
+                                "message": _("You must specify either a project or service label."),
+                            }
+                        ]
+                    },
+                    status=HTTPStatus.UNPROCESSABLE_ENTITY,
+                )
+
+            permission_denied_response = JsonResponse(
+                {
+                    "messages": [
+                        {
+                            "class": "alert alert-danger",
+                            "message": _("You do not have permission to silence this alert."),
+                        }
+                    ]
+                },
+                status=HTTPStatus.FORBIDDEN,
+            )
+            if "project" in body["labels"]:
+                project = models.Project.objects.get(name=body["labels"]["project"])
+                if (
+                    not request.user.has_perm("project_admin", project)
+                    and not request.user.has_perm("project_editor", project)
+                    and not request.user.has_perm("service_admin", project.service)
+                    and not request.user.has_perm("service_editor", project.service)
+                ):
+                    return permission_denied_response
+            elif "service" in body["labels"]:
+                service = models.Service.objects.get(name=body["labels"]["service"])
+                if not request.user.has_perm(
+                    "service_admin", service
+                ) and not request.user.has_perm("service_editor", service):
+                    return permission_denied_response
+
         try:
-            response = prometheus.silence(body.pop("labels"), **form.cleaned_data)
+            response = prometheus.silence(**form.cleaned_data)
+        except requests.HTTPError as e:
+            return JsonResponse(
+                {
+                    "messages": [
+                        {"class": "alert alert-danger", "message": e.response.text},
+                    ]
+                },
+                status=e.response.status_code,
+            )
         except Exception as e:
             return JsonResponse(
                 {"messages": [{"class": "alert alert-danger", "message": str(e)}]},
-                status=400,
+                status=HTTPStatus.UNPROCESSABLE_ENTITY,
             )
 
         return HttpResponse(
@@ -222,11 +390,193 @@ class ProxySilences(View):
         )
 
 
-class ProxyDeleteSilence(View):
-    def delete(self, request, silence_id):
-        url = urljoin(
-            util.setting("alertmanager:url"), "/api/v1/silence/%s" % silence_id
+def get_uneditable_for_user(affected_projects, affected_services, user):
+    uneditable_projects = models.Project.objects.none()
+    uneditable_services = models.Service.objects.none()
+
+    if affected_projects.exists():
+        editable_projects = promgen_permissions.get_editable_projects_for_user(user)
+        uneditable_projects = affected_projects.exclude(
+            id__in=editable_projects.values_list("id", flat=True)
         )
+
+    # If there are any affected projects, the silence is already related to some projects.
+    # Therefore, checking permissions on projects is sufficient.
+    if not affected_projects.exists() and affected_services.exists():
+        editable_services = promgen_permissions.get_editable_services_for_user(user)
+        uneditable_services = affected_services.exclude(
+            id__in=editable_services.values_list("id", flat=True)
+        )
+
+    return uneditable_projects, uneditable_services
+
+
+class ProxySilencesV2(APIView):
+    permission_classes = [permissions.IsAuthenticated]
+
+    def post(self, request, *args, **kwargs):
+        serializer = serializers.SilenceSerializer(
+            data={**request.data, "createdBy": request.user.username}
+        )
+        if not serializer.is_valid():
+            return JsonResponse(
+                {
+                    "messages": [
+                        {"class": "alert alert-warning", "message": _(m), "label": k}
+                        for k in serializer.errors
+                        for m in serializer.errors[k]
+                    ]
+                },
+                status=HTTPStatus.UNPROCESSABLE_ENTITY,
+            )
+
+        # Check if the user has permission to silence the alert
+        if not request.user.is_superuser:
+            affected_projects, affected_services = get_affected_obj_by_matchers(
+                serializer.data["matchers"]
+            )
+
+            if not affected_projects.exists() and not affected_services.exists():
+                return JsonResponse(
+                    {
+                        "messages": [
+                            {
+                                "class": "alert alert-warning",
+                                "message": _("Silence affects no projects or services."),
+                            }
+                        ]
+                    },
+                    status=HTTPStatus.FORBIDDEN,
+                )
+
+            uneditable_projects, uneditable_services = get_uneditable_for_user(
+                affected_projects, affected_services, request.user
+            )
+            messages = []
+            for objs, label in [
+                (uneditable_projects, "projects"),
+                (uneditable_services, "services"),
+            ]:
+                if objs.exists():
+                    count = objs.count()
+                    if count <= 20:
+                        names = ", ".join(objs.values_list("name", flat=True))
+                        messages.append(
+                            {
+                                "class": "alert alert-warning",
+                                "message": _(
+                                    "You do not have permission to silence alerts for "
+                                    "the following {label}: {names}."
+                                ).format(label=label, names=names),
+                            }
+                        )
+                    else:
+                        messages.append(
+                            {
+                                "class": "alert alert-warning",
+                                "message": _(
+                                    "You do not have permission to silence alerts for "
+                                    "many ({count}) {label}."
+                                ).format(count=count, label=label),
+                            }
+                        )
+            if messages:
+                return JsonResponse(
+                    {"messages": messages},
+                    status=HTTPStatus.FORBIDDEN,
+                )
+
+        try:
+            response = prometheus.silence(labels=None, **serializer.data)
+        except requests.HTTPError as e:
+            return JsonResponse(
+                {
+                    "messages": [
+                        {"class": "alert alert-danger", "message": e.response.text},
+                    ]
+                },
+                status=e.response.status_code,
+            )
+        except Exception as e:
+            return JsonResponse(
+                {"messages": [{"class": "alert alert-danger", "message": str(e)}]},
+                status=HTTPStatus.UNPROCESSABLE_ENTITY,
+            )
+
+        return HttpResponse(
+            response.text, status=response.status_code, content_type="application/json"
+        )
+
+
+class ProxyDeleteSilence(APIView):
+    permission_classes = [permissions.IsAuthenticated]
+
+    def delete(self, request, silence_id):
+        url = util.join_url(util.setting("alertmanager:url"), f"/api/v2/silence/{silence_id}")
+        # First, check if the silence exists
+        response = util.get(url)
+        if response.status_code != 200:
+            return HttpResponse(
+                response.text, status=response.status_code, content_type="application/json"
+            )
+
+        # Check if the user has permission to delete the silence
+        if not request.user.is_superuser:
+            silence = response.json()
+            affected_projects, affected_services = get_affected_obj_by_matchers(
+                silence.get("matchers", [])
+            )
+
+            if not affected_projects.exists() and not affected_services.exists():
+                return JsonResponse(
+                    {
+                        "messages": [
+                            {
+                                "class": "alert alert-warning",
+                                "message": _("You do not have permission to delete this silence."),
+                            }
+                        ]
+                    },
+                    status=HTTPStatus.FORBIDDEN,
+                )
+            uneditable_projects, uneditable_services = get_uneditable_for_user(
+                affected_projects, affected_services, request.user
+            )
+            messages = []
+            for objs, label in [
+                (uneditable_projects, "projects"),
+                (uneditable_services, "services"),
+            ]:
+                if objs.exists():
+                    count = objs.count()
+                    if count <= 20:
+                        names = ", ".join(objs.values_list("name", flat=True))
+                        messages.append(
+                            {
+                                "class": "alert alert-warning",
+                                "message": _(
+                                    "You do not have permission to expire the silence that matches "
+                                    "the following {label}: {names}."
+                                ).format(label=label, names=names),
+                            }
+                        )
+                    else:
+                        messages.append(
+                            {
+                                "class": "alert alert-warning",
+                                "message": _(
+                                    "You do not have permission to expire the silence that matches "
+                                    "many ({count}) {label}."
+                                ).format(count=count, label=label),
+                            }
+                        )
+            if messages:
+                return JsonResponse(
+                    {"messages": messages},
+                    status=HTTPStatus.FORBIDDEN,
+                )
+
+        # Delete the silence
         response = util.delete(url)
         return HttpResponse(
             response.text, status=response.status_code, content_type="application/json"

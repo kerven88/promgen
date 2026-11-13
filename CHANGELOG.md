@@ -1,5 +1,355 @@
 # Changelog
 
+# v0.75.0 - 2026-10-27
+
+[INTERNAL] Bump docker/login-action from 4.6.0 to 4.7.0 #813
+[INTERNAL] Bump actions/setup-python from 7.0.0 to 7.1.0 #812
+[IMPROVEMENT] Validate content object when testing a new Rule #811
+[IMPROVEMENT] Change method of Rule test API to POST #810
+[IMPROVEMENT] Specify required permissions for each API #807
+[IMPROVEMENT] Allow Viewer to test a Notifier #808
+[BUGFIX] Incorrect type for content_type field in API filters #809
+[IMPROVEMENT] More user-friendly messages for test Rule API #805
+[IMPROVEMENT] Add ALLOWED_HOSTS to sample command #319
+[IMPROVEMENT] Add v2 API for testing Exporters #802
+[BUGFIX] Prometheus or Alertmanager path prefix dropped #799
+[BUGFIX] DRF Spectacular renders wrong API Specification for test APIs #804
+[IMPROVEMENT] Remove leading slash from rule test API endpoint #803
+[IMPROVEMENT] Allow testing rules through API #801
+[IMPROVEMENT] Allow testing notifiers through API #800
+
+# v0.74.1 - 2026-10-01
+
+[IMPROVEMENT] Add number of Samples to the result of ExporterScrape #797
+[IMPROVEMENT] Allow exporter tables to fit long strings #796
+[IMPROVEMENT] Prefetch custom labels when rendering config #795
+
+# v0.74.0 - 2026-09-29
+
+[BUGFIX] test_rest_user sometimes fail #793
+[BUGFIX] No validations for owner permissions assignment via API #792
+[BUGFIX] Hosts can be registered to non-local farms #791
+[BUGFIX] Email notifier's value not validated through APIs #790
+[BUGFIX] V2 API logs not displayed as expected #789
+[BUGFIX] Group creator not added as Admin #788
+[IMPROVEMENT] Add docs for Promgen API configuration #787
+[IMPROVEMENT] Update permissions docs #785
+[IMPROVEMENT] Add docs for custom labels #784
+[INTERNAL] Bump docker/build-push-action from 7.3.0 to 7.4.0 #783
+[IMPROVEMENT ] Better logic for project parent and ownership #782
+[IMPROVEMENT] Specify token expiration in days #781
+[IMPROVEMENT] Add APIs for managing user tokens #780
+[IMPROVEMENT] Use datetime picker for token expiration #779
+[IMPROVEMENT] Support custom labels for Service and Project #777
+[BUGFIX] Fix activateTabFromHash function for weird hash values #778
+[IMPROVEMENT] Feature: Knox Authentication #775
+[INTERNAL] Bump actions/deploy-pages from 5.0.0 to 5.0.1 #776
+[IMPROVEMENT] Add Custom Exception Handler for Django REST Framework #774
+[IMPROVEMENT] Support for logging in API v2 #773
+[IMPROVEMENT] Query Hosts exactly by hostname on the HostDetail page #771
+[IMPROVEMENT] Use Farms in plural on the HostDetail page #772
+[IMPROVEMENT] Avoid wrong notification caused by unrelated Alert #770
+[IMPROVEMENT] Display rules on HostDetail page in a better way #769
+[IMPROVEMENT] Add new APIs for overriding Rule #764
+[BUGFIX] Validate email address for email notifier #767
+[BUGFIX] Not allow registering Project to disabled Shard #765
+[IMPROVEMENT] Specify field type for Rule serializer's labels and annotations #766
+[IMPROVEMENT] Add new APIs for integrating with Site #762
+[IMPROVEMENT] Change the serializer class of Registering Rule API #763
+[IMPROVEMENT] Add new APIs for integrating with Shard #761
+[IMPROVEMENT] Add new APIs for integrating with User #760
+[INTERNAL] Bump docker/login-action from 4.5.1 to 4.6.0 #759
+[IMPROVEMENT] Add new APIs for integrating with Service #758
+[IMPROVEMENT] Add new APIs for integrating with Project #755
+[IMPROVEMENT] Redesign the Grant Permissions UI in the Members Tab #756
+[INTERNAL] Bump docker/login-action from 4.4.0 to 4.5.1 #757
+[IMPROVEMENT] Add new APIs for integrating with Group #752
+[INTERNAL] Bump actions/checkout from 7.0.0 to 7.0.1 #751
+[INTERNAL] Bump actions/setup-python from 6.3.0 to 7.0.0 #750
+[IMPROVEMENT] Add new APIs for integrating with URL #747
+[IMPROVEMENT] Add Django SRI #749
+[BUGFIX] Rapidoc checksum mismatch in Production #748
+[IMPROVEMENT] Update notifier API to return both value and alias fields #746
+[INTERNAL] Bump docker/metadata-action from 6.1.0 to 6.2.0 #745
+[INTERNAL] Bump docker/login-action from 4.2.0 to 4.4.0 #744
+[INTERNAL] Bump docker/build-push-action from 7.2.0 to 7.3.0 #743
+[INTERNAL] Bump actions/setup-python from 6.2.0 to 6.3.0 #742
+[INTERNAL] Bump actions/checkout from 6.0.3 to 7.0.0 #741
+[IMPROVEMENT] Add new APIs for integrating with Exporter #740
+[IMPROVEMENT] Add new APIs for integrating with Farm #739
+[INTERNAL] Bump actions/checkout from 6.0.2 to 6.0.3 #738
+[IMPROVEMENT] Add new APIs for integrating with Rule #737
+[IMPROVEMENT] Add new APIs for Notifiers #733
+[INTERNAL] Bump docker/metadata-action from 6.0.0 to 6.1.0 #736
+[INTERNAL] Bump docker/login-action from 4.1.0 to 4.2.0 #735
+[INTERNAL] Bump docker/build-push-action from 7.1.0 to 7.2.0 #734
+[IMPROVEMENT] Remove the trailing slash in v2 APIs #732
+[IMPROVEMENT] Initialize v2 API #731
+[IMPROVEMENT] Add metrics to monitor requests to Promgen #729
+[BUGFIX] Fix alertmanager config path in docker compose #728
+[INTERNAL] Bump docker/build-push-action from 7.0.0 to 7.1.0 #726
+[INTERNAL] Bump actions/upload-pages-artifact from 4.0.0 to 5.0.0 #725
+[INTERNAL] Bump docker/login-action from 4.0.0 to 4.1.0 #724
+[BUGFIX] Fix wrong classification of sending alert error #723
+[IMPROVEMENT] Remove compiled messages from source code #722
+[IMPROVEMENT] Support query parameters in metrics path #713
+[INTERNAL] Bump actions/deploy-pages from 4.0.5 to 5.0.0 #720
+[REFACTOR] Replace UTCToFormattedLocalDateTime with mixins.time #721
+[IMPROVEMENT] Support editing silence #716
+[BUGFIX] Create silences with timezone-aware dates #715
+[IMPROVEMENT] Show full name and email in user select dropdown #718
+[IMPROVEMENT] Facilitate creating silences from past alerts #717
+[IMPROVEMENT] Add API to get Shard's projects #714
+[CLEANUP] Remove API to get Shard's services #719
+[IMPROVEMENT] Auto-add Service and Project labels for URL silence #712
+[IMPROVEMENT] Set a timeout for the ExporterScrape view #710
+[CLEANUP] Remove unused PAGERDUTY_SEVERITY_MAP in settings #711
+
+# v0.73.0 - 2026-03-10
+
+- [INTERNAL] Bump docker/build-push-action from 6.19.2 to 7.0.0 #709
+- [INTERNAL] Bump docker/login-action from 3.7.0 to 4.0.0 #708
+- [INTERNAL] Bump docker/metadata-action from 5.10.0 to 6.0.0 #707
+- [IMPROVEMENT] Add documentation Email and Slack notifiers #705
+- [IMPROVEMENT] Add migration check #704
+- [IMPROVEMENT] Sort the Probe list #703
+- [BUGFIX] Add missing migration for MetricSample model #702
+- [IMPROVEMENT] Support multiple PagerDuty back ends #700
+- [INTERNAL] Bump docker/build-push-action from 6.18.0 to 6.19.2 #698
+- [IMPROVEMENT] Show default value when Exporter's path is empty #696
+- [IMPROVEMENT] Fix UI quirks when showing notifier's value #695
+- [IMPROVEMENT] Add per-object permission checks #658
+
+# v0.72.4 - 2026-02-12
+
+- [IMPROVEMENT] Add Alertmanager notifier #694
+- [IMPROVEMENT] Pin Ruff's version #693
+- [INTERNAL] Bump docker/login-action from 3.6.0 to 3.7.0 #691
+- [IMPROVEMENT] Automatically set created_by field when creating new Silence #688
+- [IMPROVEMENT] Notifiers: Add support for PargerDuty #686
+- [INTERNAL] Bump actions/setup-python from 6.1.0 to 6.2.0 #690
+- [INTERNAL] Bump actions/checkout from 6.0.1 to 6.0.2 #689
+- [IMPROVEMENT] Alert notifications instrumentation #687
+- [IMPROVEMENT] Implement a Retry Mechanism for Celery Tasks #680
+- [BUGFIX] Registering an invalid URL causes an internal error #685
+- [IMPROVEMENT] Add Merge Users feature #683
+- [DOCUMENTATION] Add Promgen Task Queues explanation #684
+- [INTERNAL] Bump actions/checkout from 5.0.1 to 6.0.1 #682
+- [INTERNAL] Bump actions/setup-python from 6.0.0 to 6.1.0 #679
+- [INTERNAL] Bump docker/metadata-action from 5.8.0 to 5.10.0 #678
+- [INTERNAL] Bump actions/checkout from 5.0.0 to 5.0.1 #676
+- [BUGFIX] Fix overflow issue in the User Column of the Audit Table #675
+- [IMPROVEMENT] Show Alert's raw data inside modal #674
+- [IMPROVEMENT] Use fixed layout for Audit logs table #673
+- [IMPROVEMENT] Fix UI quirks in some tables #672
+- [BUGFIX] Wrong alert rule operator in docs example #671
+
+# v0.72.3 - 2025-11-07
+
+- [IMPROVEMENT] Document permission system #668
+- [SECURITY] Update django to 4.2.26 #667
+- [BUGFIX] User notifier stops working after changing username #665
+- [BUGFIX] Some links from audit logs don't work #664
+- [BUGFIX] User may end up with two different permissions  #663
+- [BUGFIX] Project owner without admin permission #661
+- [IMPROVEMENT] Add Audit Logs when assigning or removing permission for a Group #662
+
+# v0.72.2 - 2025-10-16
+
+- [BUGFIX] Fix deleting projects without farm #659
+
+# v0.72.1 - 2025-10-01
+
+- [BUGFIX] Remove excluded "farm" field from ProjectSerializer #657
+- [IMPROVEMENT] Always use same confirmation question to delete Farm #655
+- [INTERNAL] Bump docker/login-action from 3.5.0 to 3.6.0 #654
+- [IMPROVEMENT] Use One-To-One relationship between Farm and Project #652
+- [IMPROVEMENT] Prevent users from accessing the default group #653
+- [IMPROVEMENT] Prevent future errors in migration files #651
+- [IMPROVEMENT] Clean up orphan farms #650
+- [IMPROVEMENT] Prevent future problems with remove_farm_perms migration #649
+- [IMPROVEMENT] Make farm a child of project #648
+- [IMPROVEMENT] Support searching for Groups #647
+- [INTERNAL] Bump actions/setup-python from 5.6.0 to 6.0.0 #645
+- [IMPROVEMENT] Integrate per-object-permission with the Group model #644
+- [BUGFIX] Allow filtering Group in Audit Logs #643
+- [IMPROVEMENT] Add organizing users in groups #641
+- [BUGFIX] Fix wrong formatted string in locale file #642
+- [IMPROVEMENT] Add auto-complete box for choosing user #639
+- [INTERNAL] Bump actions/upload-pages-artifact from 3.0.1 to 4.0.0 #638
+- [BUGFIX] Add superusers to UserPermissionForm's choices #640
+
+# v0.72.0 - 2025-08-15
+
+- [IMPROVEMENT] Check ruff format in GitHub Actions #636
+- [IMPROVEMENT] Run ruff lint in GitHub Actions #635
+- [IMPROVEMENT] Support changing member's role on UI #634
+- [IMPROVEMENT] Add audit logs when assigning or removing permissions #633
+- [IMPROVEMENT] Keep parent info in audit logs #632
+- [INTERNAL] Bump actions/checkout from 4.2.2 to 5.0.0 #631
+- [BUGFIX] Perform settings override as a last action #630
+- [IMPROVEMENT] Allow defining members for Service, Project and Farm #626
+- [IMPROVEMENT] Activate a tab based on the hash value of the URL #629
+- [INTERNAL] Bump docker/login-action from 3.4.0 to 3.5.0 #627
+- [INTERNAL] Bump docker/metadata-action from 5.7.0 to 5.8.0 #628
+- [IMPROVEMENT] Support all operators for silences #620
+- [IMPROVEMENT] Using only one UI for showing Active Silences #624
+- [IMPROVEMENT] Add Edit button when showing the rule list #623
+
+# v0.71.0 - 2025-07-02
+
+- [BUGFIX] Add missing opening div tag #621
+- [IMPROVEMENT] Sort the Farm's sources on the Project Detail page #618
+- [IMPROVEMENT] Organize the Project Detail Page with Tabs #617
+- [IMPROVEMENT] Move buttons to Rule Detail page from Rule Update page #619
+- [BUGFIX] Make notifier's filters not editable if 'show_edit' is false #616
+- [SECURITY] Not provide query results when testing Rule #614
+- [BUGFIX] Fix error messages showed when testing a site rule #615
+- [BUGFIX] Remove empty row when registering a new project #613
+- [BUGFIX] Fix shard unchecked when updating a project with an invalid form #612
+- [BUGFIX] Fix the breadcrumb of the Service Update page #611
+- [BUGFIX] Global messages: Use the right CSS class for errors #610
+- [IMPROVEMENT] Python files cleanup #609
+- [IMPROVEMENT] Align the form field with its label #608
+
+# v0.70.0 - 2025-06-04
+
+- [IMPROVEMENT] Make owner fields not nullable #581
+- [IMPROVEMENT] Permission check for Alertmanager #595
+- [IMPROVEMENT] Fix UI quirks in the Farm Register page #604
+- [IMPROVEMENT] Add 'Token' panel to UI #596
+- [IMPROVEMENT] Fix UI quirks in Farm detail page #602
+- [IMPROVEMENT] Set owner when adding external farms #599
+- [IMPROVEMENT] Improve the feature displaying data source load #597
+- [IMPROVEMENT] Preventing the browser from caching promgen.vue.js file #600
+- [IMPROVEMENT] Rename some buttons #598
+- [IMPROVEMENT] Disengage Farm Update from Project #594
+- [IMPROVEMENT] Use DRF's APIView for AlertReceiver API #591
+- [IMPROVEMENT] Fix LegacyKeyValueFormat warnings in Dockerfile #589
+- [CLEANUP] Delete the unused template file url_form.html #592
+- [BUGFIX] Fix external Farm linkage #605
+- [BUGFIX] Trim whitespaces of search input #593
+- [BUGFIX] "Home" link in some breadcrumbs redirects to "Services" page #588
+- [INTERNAL] Bump docker/build-push-action from 6.17.0 to 6.18.0 #601
+- [INTERNAL] Update CODEOWNERS #606
+- [INTERNAL] Bump docker/build-push-action from 6.16.0 to 6.17.0 #590
+- [INTERNAL] Bump docker/build-push-action from 6.15.0 to 6.16.0 #587
+- [INTERNAL] Bump actions/setup-python from 5.5.0 to 5.6.0 #586
+
+# v0.69.0 - 2025-04-25
+
+- [IMPROVEMENT] Return owner name in Farm API #583
+- [IMPROVEMENT] Add owner field to Farm object #582
+
+# v0.68.0 - 2025-03-13
+
+- [SECURITY] Remove 'authorization' field from the retrieve Shard API #576
+
+# v0.67.1 - 2025-03-04
+
+- [BUGFIX] Misleading =~ operator in silence form #570
+- [BUGFIX] Display active silences and rules for service #568
+- [IMPROVEMENT] Improve UI/UX of the global list of silence #569
+- [BUGFIX] templates/service_detail: Show description #567
+
+# v0.67.0 - 2025-02-26
+
+- [BUGFIX] Add a missing migration for the change in regex validation #564
+- [IMPROVEMENT] Improve the UI/UX of Promgen #563
+- [IMPROVEMENT] Handle query for the audit logs of deleted objects #558
+- [BUGFIX] Store the correct rule ID in rule annotation #556
+- [IMPROVEMENT] Organize Service View Page with Tabs #551
+- [IMPROVEMENT] Truncate long silence matchers #550
+- [IMPROVEMENT] Service: Group action buttons inside a dropdown menu #546
+
+# v0.66.0 - 2024-09-25
+
+- [IMPROVEMENT] Test metrics validity when testing Exporter #526
+- [IMPROVEMENT] Shard: Add support for Authorization header #518
+- [BUGFIX] Fix promql-query Vue component rendering #516
+- [INTERNAL] Upgrade Celery #514
+- [INTERNAL] Django upgrade fixes #515
+- [INTERNAL] Update dependencies #513
+- [INTERNAL] Update mysql settings in docker-compose #509
+
+# v0.65.0 - 2024-05-16
+
+- [BUGFIX] Fix testing Rule query before saving #510
+
+# v0.64.0 - 2024-04-30
+
+- [BUGFIX] Fix search: Be more specific with v-pre #506
+
+# v0.63.0 - 2024-04-25
+
+- [BUGFIX] views/NotifierUpdate: Escape square brackets in global message #503
+- [BUGFIX] global_messages: Move v-pre to a more specific place #502
+- [BUGFIX] templates: Add v-pre to protect against XSS #501
+- [INTERNAL] Routine Dependabot updates #500
+- [INTERNAL] Bump actions/checkout from 4.1.2 to 4.1.3 #499
+
+# v0.62.0 - 2024-04-22
+
+- [BUGFIX] Use additional v-pre tags to avoid issues with user input. #498
+- [BUGFIX] Fix for foreign key check regarding m2m #497
+- [BUGFIX] Reset self.object on form_invalid #496
+- [BUGFIX] Fix notification splay #494
+- [INTERNAL] Upgrade to Django 4.2 #495
+- [INTERNAL] Migrate Black to Ruff for code formatting #487
+- [IMPROVEMENT] Rewrite filter from jQuery to regular JavaScript #486
+
+# v0.61.0 - 2024-03-04
+
+- [BUGFIX] Stricter validation for object names #476
+- [IMPROVEMENT] Rewrite copyto attribute in plain javascript #482
+- [IMPROVEMENT] Update to Alertmanager v2 API #481
+- [INTERNAL] Adopt pyproject.toml #479
+- [INTERNAL] Update various packages #480
+
+# v0.60.0 - 2024-01-26
+
+- [IMPROVEMENT] Add notifiers to audit logs #473
+- [IMPROVEMENT] Audit logs: Show projects for services #472
+- [BUGFIX] Fix silence form's delete label #468
+- [BUGFIX] Rule: Check content_object before accessing it #470
+
+# v0.59.0 - 2023-12-11
+
+- [IMPROVEMENT] notification/webhook: Add alias field #462
+- [DOCUMENTATION] Fix Promgen init documentation #459
+- [DOCUMENTATION] Update terms in documentation #448
+- [IMPROVEMENT] Migrate to Vue 3 #442
+- [INTERNAL] Convert Vue filters into methods #441
+- [INTERNAL] Reorganize Vue templates #440
+- [INTERNAL] Remove envdir #439
+- [BUGFIX] Fix check for invalid annotation name #437
+- [BUGFIX] Fix instance of Rule.add_label #436
+- [BUGFIX] Fix for rule prefetch on /search #435
+
+# v0.58.0 - 2023-08-07
+
+This release is primarily focused on upgrading Python version and assorted package versions.
+
+- [BUGFIX] Fix testing site rules with expected_labels #425
+- [BUGFIX] Stricter checks about silencing global rules #433
+- [IMPROVEMENT] Add debug warning to top of page #426
+- [IMPROVEMENT] Additional alert filters #432
+- [INTERNAL] Convert Rule label/annotation storage to JsonField #427
+- [INTERNAL] Update requirements #431
+- [INTERNAL] Upgrade to Python3.9 #429
+- [INTERNAL] Use ruff for formatting #434
+
+# v0.57.0 - 2023-06-12
+
+- [BUGFIX] Fix DatasourceList view #405
+- [IMPROVEMENT] Improve notifiers description #417
+- [IMPROVEMENT] Rule Test should check for unrelated labels #424
+- [IMPROVEMENT] Show rule description in rule page #403
+- [INTERNAL] Migrate more tests to use fixtures #418
+- [INTERNAL] Update docker-compose demo environment #402
+- [INTERNAL] Upgrade to use pip-compile #406
+- [INTERNAL] Use Black to format #416
+
 # v0.56.0 - 2022-07-29
 
 - [BUGFIX] Fix handling of kwargs in skip_raw decorator #396

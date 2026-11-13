@@ -31,6 +31,150 @@ function update_page(data) {
   }
 }
 
+function doesMatcherMatch(matcher, labelName, labelValue) {
+  if (matcher.name !== labelName) {
+    return false;
+  }
+
+  if (matcher.isRegex) {
+    const regex = new RegExp("^(?:" + matcher.value + ")$");
+    const matches = regex.test(labelValue);
+    return matcher.isEqual ? matches : !matches;
+  } else {
+    return matcher.isEqual ?
+      (matcher.value === labelValue) :
+      (matcher.value !== labelValue);
+  }
+}
+
+function getActiveSilences(items, labelName, labelValue) {
+  const activeSilences = [];
+  for (const item of items) {
+    const matches = item.matchers.some(matcher =>
+      doesMatcherMatch(matcher, labelName, labelValue)
+    );
+    if (matches) {
+      activeSilences.push(item);
+    }
+  }
+  return activeSilences;
+}
+
+// https://blog.bitsrc.io/debounce-understand-and-learn-how-to-use-this-essential-javascript-skill-9db0c9afbfc1
+function debounce(func, delay = 250) {
+  let timerId;
+  return (...args) => {
+    clearTimeout(timerId);
+    timerId = setTimeout(() => {
+      func.apply(this, args);
+    }, delay);
+  };
+}
+
+// Wait until DOM is loaded to add our extra listeners
+document.addEventListener("DOMContentLoaded", function () {
+  /*
+    Copy to shortcut
+
+    Example: <code data-copyto="#id_duration">30s</code>
+  */
+  document.querySelectorAll("[data-copyto]").forEach(srcElement => {
+    srcElement.style.cursor = "pointer";
+    srcElement.addEventListener("click", e => {
+      const dstElement = document.querySelector(srcElement.dataset.copyto);
+      dstElement.value = srcElement.innerText;
+    });
+  });
+
+  /*
+  Filter Element
+
+  Example: <input data-filter="div.auto-grid div">
+  */
+  document.querySelectorAll("[data-filter]").forEach(srcElement => {
+    const filterTarget = document.querySelectorAll(srcElement.dataset.filter);
+
+    srcElement.addEventListener(
+      "input",
+      debounce(e => {
+        const search = srcElement.value.toUpperCase();
+        console.debug("Searching for", search);
+        for (const child of filterTarget) {
+          const txt = child.innerText.toUpperCase();
+          child.style.display = txt.indexOf(search) > -1 ? "block" : "none";
+        }
+      })
+    );
+  });
+});
+
+function initSelect2() {
+  const selectors = ["username", "owner", "group", "user_to_merge_from", "user_to_merge_into"]
+    .map(name => `select[name="${name}"]`)
+    .join(",");
+  $(selectors).select2({
+    placeholder: "Select an option",
+    width: "25%",
+    theme: "bootstrap",
+  });
+  $('select[name="users"]').select2({
+    multiple: "multiple",
+    placeholder: "Select users",
+    theme: "bootstrap",
+  });
+  $('.promgen-permission-panel select[name="username"]').select2({
+    placeholder: "Enter username, email, or name",
+    width: "75%",
+    theme: "bootstrap",
+  });
+  $('.promgen-permission-panel select[name="group"]').select2({
+    placeholder: "Enter group name",
+    width: "75%",
+    theme: "bootstrap",
+  });
+}
+
+// Activate a tab based on the hash value of the URL
+// For example, if the URL is `http://example.com#tab2`, it will activate the tab with id `tab2`.
+function activateTabFromHash() {
+  let hash = window.location.hash;
+  if (!hash) {
+    return;
+  }
+
+  // Escapes any character that has a special meaning in a CSS selector to ensure that the hash
+  // can be used as a valid selector.
+  hash = "#" + $.escapeSelector(hash.replace(/^#/, ""));
+  if ($(hash).length) {
+    // Remove active class from all tabs and tab content
+    $(".nav-tabs li").removeClass("active");
+    $(".tab-pane:not(.perm-tab-pane)").removeClass("active");
+
+    // Add active class to tab and tab content that matches the hash
+    $('a[href="' + hash + '"]').parent().addClass("active");
+    $(hash).addClass("active");
+
+    // The Select2 constructor relies on being able to read the dimensions of the input element,
+    // which cannot be done when it's not part of the DOM yet, or hidden.
+    // To fix this, instantiate the Select2 again when the tab becomes visible.
+    // Ref: https://stackoverflow.com/questions/55277454/select2-not-working-inside-a-bootstrap-tab
+    initSelect2();
+
+    // The hash (fragment) cannot be sent to the server side when submitting forms or clicking
+    // buttons. Ref: http://www.w3.org/DesignIssues/Fragment.html
+    // Therefore, we add the hash to the action URLs so that the browser can redirect to
+    // the correct tab anytime when the server responds with HTTP Referer redirects. For example,
+    // after permission check fails.
+    document.querySelectorAll("form").forEach(form => {
+      form.action = form.action.replace(/#.*$/, "") + hash;
+    });
+    document.querySelectorAll("a.btn:not([data-toggle])").forEach(btn => {
+      btn.href = btn.href.replace(/#.*$/, "") + hash;
+    });
+
+  }
+}
+
 $(document).ready(function() {
   $('[data-toggle="popover"]').popover();
   $('[data-toggle="tooltip"]').tooltip();
@@ -45,11 +189,6 @@ $(document).ready(function() {
     $.post(btn.data('href'), btn.data()).done(update_page);
   }).css('cursor', 'pointer');
 
-  $('[data-copyto]').click(function(){
-    var ele = $(this);
-    $(ele.data('copyto')).val(ele.text())
-  }).css('cursor', 'pointer');
-
   $('[data-toggle="toggle"]').bootstrapSwitch();
   $('[data-toggle="toggle"][data-action]').on('switchChange.bootstrapSwitch', function(event, state) {
     if (window.confirm("Are you sure?")) {
@@ -57,7 +196,12 @@ $(document).ready(function() {
         // Ideally we would directly update things that need to be updated
         // but a page redraw is a bit easier since that also allows us to
         // update our page messages
-        window.location = data.redirect
+        window.location = data.redirect;
+        if (data.redirect.includes('#')) {
+          // If the redirect contains a hash, the browser may not reload the page
+          // so we need to force a reload. Otherwise this code won't be reached.
+          window.location.reload();
+        }
       });
     } else {
       // If we click the cancel button, then we restore the old state and
@@ -66,11 +210,87 @@ $(document).ready(function() {
     }
   });
 
-  $('[data-filter]').change(function(){
-    var search = this.value.toUpperCase();
-    $(this.dataset.filter).each(function(i, ele){
-      var txt = $(this).text().toUpperCase();
-      ele.style.display = txt.indexOf(search) > -1 ? "" : "none"
+  // Activate tab based on hash on page load
+  activateTabFromHash();
+
+  // Update the hash when a tab is clicked
+  $('.nav-tabs a').on('click', function(e) {
+      window.location.hash = this.hash;
+  });
+
+  // Activate tab based on hash changed by back/forward navigation
+  $(window).on('hashchange', function() {
+      activateTabFromHash();
+  });
+
+  $('input[type="radio"][name="perm-type"]').change(function () {
+    const target = $(this).data("target");
+    $(".perm-tab-pane").removeClass("active in");
+    $(target + "-label").addClass("active in");
+    $(target + "-select").addClass("active in");
+    initSelect2();
+  });
+
+  // Initialize Select2 for the select elements
+  initSelect2();
+
+  // Update the toggle icon for permission panels based on their collapse state
+  $(".promgen-permission-panel [data-toggle='collapse']").each(function() {
+    const trigger = $(this);
+    const icon = trigger.find(".toggle-icon");
+    const panel = $(trigger.data("target"));
+
+    const setIcon = isExpanded => {
+      icon
+        .addClass("glyphicon")
+        .toggleClass("glyphicon-chevron-down", !isExpanded)
+        .toggleClass("glyphicon-chevron-up", isExpanded);
+    };
+
+    panel.on("show.bs.collapse", function() { setIcon(true); });
+    panel.on("hide.bs.collapse", function() { setIcon(false); });
+
+    setIcon(panel.hasClass("in"));
+  });
+
+  // Copy-to-clipboard event
+  $("#copy-to-clipboard-btn").tooltip();
+  $("#copy-to-clipboard-btn").click(function() {
+    var copyText = document.getElementById("copy-to-clipboard-input").value;
+    navigator.clipboard.writeText(copyText).then(function() {
+      $("#copy-to-clipboard-btn")
+        .attr("data-original-title", "Copied!")
+        .tooltip('show');
+      // Reset the tooltip text after mouse leaves the button
+      $("#copy-to-clipboard-btn").mouseleave(function() {
+        $(this).attr("data-original-title", "Copy to clipboard");
+      });
     })
   });
+
+  // Set the Knox API token for RapiDoc
+  $("#api-token-button").click(function() {
+    const token = $("#api-token-input").val();
+    if (token) {
+      const rapidoc = document.getElementById("rapidoc");
+      rapidoc.setApiKey("knoxApiToken", "Token " + token);
+      $("#api-token-label").text("API Token set to: " + token);
+    }
+  });
+
+  // Set the user's current timezone for forms
+  $("#id_user_timezone").attr("value", luxon.DateTime.local().zoneName);
+
+  // Set the min and max expiration date for API tokens DatePicker
+  const tokenExpirationDatePicker = $('input[type="date"][name="expiration"]');
+  const today = luxon.DateTime.local();
+  tokenExpirationDatePicker.attr("min", today.toISODate());
+  const max = tokenExpirationDatePicker.attr("max_expiration_in_days");
+  if (max) {
+    const days = parseInt(max, 10);
+    if (Number.isFinite(days)) {
+      tokenExpirationDatePicker.attr("max", today.plus({ days }).toISODate());
+    }
+  }
+
 });

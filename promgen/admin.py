@@ -2,11 +2,17 @@
 # These sources are released under the terms of the MIT license: see LICENSE
 import json
 
+import guardian.admin
 from django import forms
 from django.contrib import admin
+from django.contrib.auth.admin import UserAdmin
+from django.contrib.auth.models import User
+from django.urls import path
 from django.utils.html import format_html
+from knox.admin import AuthTokenAdmin
 
-from promgen import actions, models, plugins
+from promgen import actions, models, plugins, views
+from promgen.forms import PromgenAuthTokenCreateForm
 
 
 class PrometheusInline(admin.TabularInline):
@@ -19,7 +25,7 @@ class FilterInline(admin.TabularInline):
 
 @admin.register(models.Host)
 class HostAdmin(admin.ModelAdmin):
-    list_display = ('name', 'farm')
+    list_display = ("name", "farm")
 
 
 @admin.register(models.Shard)
@@ -35,55 +41,55 @@ class ShardAdmin(admin.ModelAdmin):
 
 
 @admin.register(models.Service)
-class ServiceAdmin(admin.ModelAdmin):
-    list_display = ('name', 'owner')
-    list_filter = (('owner', admin.RelatedOnlyFieldListFilter),)
-    list_select_related = ('owner',)
+class ServiceAdmin(guardian.admin.GuardedModelAdmin):
+    list_display = ("name", "owner")
+    list_filter = (("owner", admin.RelatedOnlyFieldListFilter),)
+    list_select_related = ("owner",)
 
 
 @admin.register(models.Project)
-class ProjectAdmin(admin.ModelAdmin):
-    list_display = ('name', 'shard', 'service', 'farm', 'owner')
-    list_select_related = ('service', 'farm', 'shard', 'owner')
-    list_filter = ('shard', ('owner', admin.RelatedOnlyFieldListFilter),)
+class ProjectAdmin(guardian.admin.GuardedModelAdmin):
+    list_display = ("name", "shard", "service", "farm", "owner")
+    list_select_related = ("service", "farm", "shard", "owner")
+    list_filter = ("shard", ("owner", admin.RelatedOnlyFieldListFilter))
 
 
 class SenderForm(forms.ModelForm):
-    sender = forms.ChoiceField(choices=[
-        (entry.module_name, entry.module_name) for entry in plugins.notifications()
-    ])
+    sender = forms.ChoiceField(
+        choices=[(entry.module_name, entry.module_name) for entry in plugins.notifications()]
+    )
 
     class Meta:
         model = models.Sender
-        exclude = ['content_object']
+        exclude = ["content_object"]
 
 
 @admin.register(models.Sender)
 class SenderAdmin(admin.ModelAdmin):
-    list_display = ('content_object', 'content_type', 'sender', 'show_value', 'owner')
+    list_display = ("content_object", "content_type", "sender", "show_value", "owner")
     form = SenderForm
-    list_filter = ('sender', 'content_type')
-    list_select_related = ('content_type',)
+    list_filter = ("sender", "content_type")
+    list_select_related = ("content_type",)
     inlines = [FilterInline]
 
 
 @admin.register(models.Farm)
-class FarmAdmin(admin.ModelAdmin):
-    list_display = ('name', 'source')
-    list_filter = ('source',)
+class FarmAdmin(guardian.admin.GuardedModelAdmin):
+    list_display = ("name", "source")
+    list_filter = ("source",)
 
 
 @admin.register(models.Exporter)
 class ExporterAdmin(admin.ModelAdmin):
-    list_display = ('job', 'port', 'path', 'project', 'enabled')
-    list_filter = ('job', 'port',)
-    readonly_fields = ('project',)
+    list_display = ("job", "port", "path", "project", "enabled")
+    list_filter = ("job", "port")
+    readonly_fields = ("project",)
 
 
 @admin.register(models.DefaultExporter)
 class DefaultExporterAdmin(admin.ModelAdmin):
-    list_display = ('job', 'port', 'path')
-    list_filter = ('job', 'port')
+    list_display = ("job", "port", "path")
+    list_filter = ("job", "port")
 
 
 @admin.register(models.Probe)
@@ -104,24 +110,15 @@ class URLAdmin(admin.ModelAdmin):
     readonly_fields = ("project",)
 
 
-class RuleLabelInline(admin.TabularInline):
-    model = models.RuleLabel
-
-
-class RuleAnnotationInline(admin.TabularInline):
-    model = models.RuleAnnotation
-
-
 @admin.register(models.Rule)
 class RuleAdmin(admin.ModelAdmin):
-    list_display = ('name', 'clause', 'duration', 'content_object')
-    list_filter = ('duration',)
-    list_select_related = ('content_type',)
-    inlines = [RuleLabelInline, RuleAnnotationInline]
+    list_display = ("name", "clause", "duration", "content_object")
+    list_filter = ("duration",)
+    list_select_related = ("content_type",)
 
     def get_queryset(self, request):
         qs = super().get_queryset(request)
-        return qs.prefetch_related('content_object',)
+        return qs.prefetch_related("content_object")
 
 
 @admin.register(models.Prometheus)
@@ -145,9 +142,9 @@ class AlertAdmin(admin.ModelAdmin):
         def __get_label(label):
             def __wrapped(instance):
                 try:
-                    return instance.json['commonLabels'][label]
+                    return instance.json["commonLabels"][label]
                 except KeyError:
-                    return ''
+                    return ""
 
             # We give the wrapped function the same description as
             # our label so that it shows up right in the admin panel
@@ -157,27 +154,64 @@ class AlertAdmin(admin.ModelAdmin):
         if name in self.list_display:
             return __get_label(name)
 
-    date_hierarchy = 'created'
+    date_hierarchy = "created"
     list_display = (
-        'created',
-        'datasource',
-        'alertname',
-        'service',
-        'project',
-        'severity',
-        'job',
+        "created",
+        "datasource",
+        "alertname",
+        "service",
+        "project",
+        "severity",
+        "job",
     )
 
-    fields = ('created', '_json')
-    readonly_fields = ('created', '_json')
-    ordering = ('-created',)
+    fields = ("created", "_json")
+    readonly_fields = ("created", "_json")
+    ordering = ("-created",)
 
     @admin.display(description="json")
     def _json(self, instance):
-        return format_html('<pre>{}</pre>', json.dumps(instance.json, indent=2))
+        return format_html("<pre>{}</pre>", json.dumps(instance.json, indent=2))
 
     def has_add_permission(self, request, obj=None):
         return False
 
     def has_change_permission(self, request, obj=None):
         return False
+
+
+class PromgenUserAdmin(UserAdmin):
+    def get_urls(self):
+        urls = super().get_urls()
+        custom_urls = [
+            path(
+                "merge/",
+                self.admin_site.admin_view(views.UserMergeView.as_view()),
+                name="user-merge",
+            ),
+        ]
+        return custom_urls + urls
+
+
+admin.site.unregister(User)
+admin.site.register(User, PromgenUserAdmin)
+
+
+@admin.register(models.AuthToken)
+class AuthTokenAdmin(AuthTokenAdmin):
+    add_form = PromgenAuthTokenCreateForm
+    list_display = ("name", "user", "created", "expiry", "token_key")
+    list_filter = ("name", "user", "token_key")
+    readonly_fields = ("digest", "token_key")
+
+
+@admin.register(models.CustomLabel)
+class CustomLabelAdmin(admin.ModelAdmin):
+    list_display = ("label_name", "model", "display_name", "is_required")
+    list_filter = ("model",)
+
+
+@admin.register(models.CustomLabelInstance)
+class CustomLabelInstanceAdmin(admin.ModelAdmin):
+    list_display = ("value", "custom_label", "content_object", "content_type")
+    list_filter = ("custom_label__label_name", "content_type")

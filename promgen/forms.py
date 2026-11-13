@@ -1,40 +1,50 @@
 # Copyright (c) 2017 LINE Corporation
 # These sources are released under the terms of the MIT license: see LICENSE
-
+import datetime
 import re
+import uuid
+from functools import partial
+from zoneinfo import ZoneInfo
 
 from dateutil import parser
-
-from promgen import models, plugins, prometheus, validators
-
 from django import forms
+from django.contrib.auth.models import User
+from django.contrib.contenttypes.models import ContentType
 from django.core.exceptions import ValidationError
+from django.utils import timezone
+from django.utils.translation import gettext as _
+from guardian.conf.settings import ANONYMOUS_USER_NAME
+from guardian.shortcuts import get_perms_for_model
+from knox.admin import AuthTokenCreateForm
+
+from promgen import errors, models, plugins, prometheus, settings, validators
+from promgen.middleware import get_current_user
 
 
 class ImportConfigForm(forms.Form):
     def _choices():
-        return [('', '<Default>')] + sorted((shard.name, 'Import into: ' + shard.name) for shard in models.Shard.objects.all())
+        return [("", "<Default>")] + sorted(
+            (shard.name, "Import into: " + shard.name) for shard in models.Shard.objects.all()
+        )
 
     config = forms.CharField(
-        widget=forms.Textarea(attrs={'rows': 5, 'class': 'form-control'}),
-        required=False)
-    url = forms.CharField(
-        widget=forms.TextInput(attrs={'class': 'form-control'}),
-        required=False)
+        widget=forms.Textarea(attrs={"rows": 5, "class": "form-control"}), required=False
+    )
+    url = forms.CharField(widget=forms.TextInput(attrs={"class": "form-control"}), required=False)
     file_field = forms.FileField(
-        widget=forms.FileInput(attrs={'class': 'form-control'}),
-        required=False)
+        widget=forms.FileInput(attrs={"class": "form-control"}), required=False
+    )
 
     shard = forms.ChoiceField(choices=_choices, required=False)
 
 
 class ImportRuleForm(forms.Form):
     rules = forms.CharField(
-        widget=forms.Textarea(attrs={'rows': 5, 'class': 'form-control'}),
-        required=False)
+        widget=forms.Textarea(attrs={"rows": 5, "class": "form-control"}), required=False
+    )
     file_field = forms.FileField(
-        widget=forms.FileInput(attrs={'class': 'form-control'}),
-        required=False)
+        widget=forms.FileInput(attrs={"class": "form-control"}), required=False
+    )
 
     def clean(self):
         if any(self.cleaned_data.values()):
@@ -43,36 +53,49 @@ class ImportRuleForm(forms.Form):
 
 
 class SilenceForm(forms.Form):
-
     duration = forms.CharField(required=False, validators=[validators.duration])
     startsAt = forms.CharField(required=False, validators=[validators.datetime])
     endsAt = forms.CharField(required=False, validators=[validators.datetime])
     comment = forms.CharField(required=False)
-    createdBy = forms.CharField(required=False)
+    createdBy = forms.CharField()
 
     def clean_comment(self):
-        if self.cleaned_data['comment']:
-            return self.cleaned_data['comment']
+        if self.cleaned_data["comment"]:
+            return self.cleaned_data["comment"]
         return "Silenced from Promgen"
 
-    def clean_createdBy(self):
-        if self.cleaned_data['createdBy']:
-            return self.cleaned_data['createdBy']
-        return "Promgen"
-
     def clean(self):
-        duration = self.data.get('duration')
-        start = self.data.get('startsAt')
-        stop = self.data.get('endsAt')
+        data = super().clean()
 
-        if duration:
+        # Validation for labels
+        if "labels" not in self.data or not self.data["labels"]:
+            raise errors.SilenceError.NOLABEL.error()
+
+        # Users should not be able to accidentally silence a global rule without
+        # setting some other labels as well.
+        if "alertname" in self.data["labels"]:
+            if "service" not in self.data["labels"] and "project" not in self.data["labels"]:
+                rule = models.Rule.objects.get(name=self.data["labels"]["alertname"])
+                if rule.content_type.model == "site":
+                    raise errors.SilenceError.GLOBALSILENCE.error()
+
+        # Once labels have been validated, we want to add them to our cleaned data so
+        # they can be submitted.
+        self.cleaned_data["labels"] = self.data["labels"]
+
+        if data.get("duration"):
             # No further validation is required if only duration is set
             return
 
+        # Validate our start/end times
+        start = data.get("startsAt")
+        stop = data.get("endsAt")
+
         if not all([start, stop]):
-            raise forms.ValidationError('Both start and end are required')
+            raise errors.SilenceError.STARTENDTIME.error()
+
         elif parser.parse(start) > parser.parse(stop):
-            raise forms.ValidationError('Start time and end time is mismatch')
+            raise errors.SilenceError.STARTENDMISMATCH.error()
 
 
 class SilenceExpireForm(forms.Form):
@@ -92,18 +115,104 @@ class ExporterForm(forms.ModelForm):
             "scheme": forms.Select(attrs={"class": "form-control"}),
         }
 
+    def clean_path(self):
+        from urllib.parse import parse_qs, urlparse
 
-class ServiceRegister(forms.ModelForm):
+        path = self.cleaned_data["path"]
+        if not path:
+            return path
+
+        # Validate path and query parameters
+        parsed = urlparse(path)
+        query_params = parse_qs(qs=parsed.query)
+        query_params = {k: list(set(v)) for k, v in query_params.items()}
+        for key, values in query_params.items():
+            validators.validate_utf8(key)
+            if len(values) > 1:
+                raise ValidationError(
+                    "List values are currently not supported for query parameters."
+                )
+            for v in values:
+                validators.validate_utf8(v)
+
+        # Reconstruct the path with cleaned params
+        query_string = "&".join(
+            f"{key}={value}" for key, values in query_params.items() for value in values
+        )
+        return parsed.path + ("?" + query_string if query_string else "")
+
+
+class _CustomLabelModelForm(forms.ModelForm):
+    custom_label_prefix = "custom_label_"
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+
+        custom_labels = models.CustomLabel.objects.filter(
+            model=ContentType.objects.get_for_model(self._meta.model)
+        )
+        initial_labels = {
+            custom_label.custom_label.label_name: custom_label.value
+            for custom_label in self.instance.custom_labels.all()
+        }
+
+        for field in custom_labels:
+            self.fields[f"{self.custom_label_prefix}{field.label_name}"] = forms.CharField(
+                label=field.display_name,
+                required=field.is_required,
+                help_text=field.description,
+                initial=initial_labels.get(field.label_name),
+                validators=[validators.labelvalue],
+            )
+
+    def save(self, commit=True):
+        instance = super().save(commit=False)
+        if commit:
+            custom_labels = {}
+            for field, value in self.cleaned_data.items():
+                if field.startswith(self.custom_label_prefix):
+                    custom_labels[field[len(self.custom_label_prefix) :]] = value
+            instance.save(custom_labels=custom_labels)
+        return instance
+
+
+class ServiceRegister(_CustomLabelModelForm):
     class Meta:
         model = models.Service
         # shard is determined by the pk in the service register url
-        exclude = ['shard']
+        exclude = ["shard"]
 
 
-class ServiceUpdate(forms.ModelForm):
+class ServiceUpdate(_CustomLabelModelForm):
     class Meta:
         model = models.Service
         exclude = []
+
+
+class ProjectRegister(_CustomLabelModelForm):
+    class Meta:
+        model = models.Project
+        # service is determined by the pk in the project register url
+        exclude = ["service"]
+
+    def clean_shard(self):
+        shard = self.cleaned_data["shard"]
+        if not shard.enabled:
+            raise ValidationError("Shard is disabled.")
+        return shard
+
+
+class ProjectUpdate(_CustomLabelModelForm):
+    class Meta:
+        model = models.Project
+        exclude = []
+
+    def clean_shard(self):
+        shard = self.cleaned_data["shard"]
+        # If the shard is being changed, we need to make sure that the new shard is enabled.
+        if shard != self.instance.shard and not shard.enabled:
+            raise ValidationError("Shard is disabled.")
+        return shard
 
 
 class URLForm(forms.ModelForm):
@@ -119,20 +228,30 @@ class URLForm(forms.ModelForm):
 class AlertRuleForm(forms.ModelForm):
     class Meta:
         model = models.Rule
-        exclude = ['parent', 'content_type', 'object_id']
         widgets = {
-            'name': forms.TextInput(attrs={'class': 'form-control'}),
-            'duration': forms.TextInput(attrs={'class': 'form-control'}),
-            'clause': forms.Textarea(attrs={'rows': 5, 'class': 'form-control'}),
-            'enabled': forms.CheckboxInput(attrs={'data-toggle': 'toggle', 'data-size': 'mini'}),
-            'description': forms.Textarea(attrs={'rows': 5, 'class': 'form-control'}),
+            "name": forms.TextInput(attrs={"class": "form-control"}),
+            "duration": forms.TextInput(attrs={"class": "form-control"}),
+            "clause": forms.Textarea(attrs={"rows": 5, "class": "form-control"}),
+            "enabled": forms.CheckboxInput(attrs={"data-toggle": "toggle", "data-size": "mini"}),
+            "description": forms.Textarea(attrs={"rows": 5, "class": "form-control"}),
         }
+        # We define a custom widget for each of our fields, so we just take the
+        # keys here to avoid manually updating a list of fields.
+        fields = widgets.keys()
 
     def clean(self):
         # Check our cleaned data then let Prometheus check our rule
         super().clean()
         rule = models.Rule(**self.cleaned_data)
-        
+
+        # In Django https://code.djangoproject.com/ticket/19580, some of the
+        # foreign key checks got stricter. We sets pk to 0 here so that it passes
+        # django's m2m/foreign key checks, but marks for us that it's a temporary
+        # rule that doesn't actually exist.
+        # We'll likely want to rework this assumption when we move to a different
+        # promql check
+        rule.pk = 0
+
         # Make sure we pull in our labels and annotations for
         # testing if needed
         # See django docs on cached_property
@@ -142,31 +261,72 @@ class AlertRuleForm(forms.ModelForm):
         prometheus.check_rules([rule])
 
 
-class RuleCopyForm(forms.Form):
-    content_type = forms.ChoiceField(choices=[(x, x) for x in ['service', 'project']])
+class _KeyValueForm(forms.Form):
+    key = forms.CharField(widget=forms.TextInput(attrs={"class": "form-control"}))
+    value = forms.CharField(widget=forms.TextInput(attrs={"class": "form-control"}))
+
+
+# We need a custom KeyValueSet because we need to be able to convert between the single dictionary
+# form saved to our models, and the list of models used by
+class _KeyValueSet(forms.BaseFormSet):
+    def __init__(self, initial=None, **kwargs):
+        if initial:
+            kwargs["initial"] = [{"key": key, "value": initial[key]} for key in initial]
+        super().__init__(**kwargs, form_kwargs={"empty_permitted": True})
+
+    def to_dict(self):
+        return {x["key"]: x["value"] for x in self.cleaned_data if x and not x["DELETE"]}
+
+
+# For both LabelFormSet and AnnotationFormSet we always want to have a prefix assigned, but it's
+# awkward if we need to specify it in multiple places. We use a partial here, so that it is the same
+# as always passing prefix as part of our __init__ call.
+LabelFormSet = partial(
+    forms.formset_factory(
+        form=_KeyValueForm,
+        formset=_KeyValueSet,
+        can_delete=True,
+        extra=1,
+    ),
+    prefix="labels",
+)
+
+AnnotationFormSet = partial(
+    forms.formset_factory(
+        form=_KeyValueForm,
+        formset=_KeyValueSet,
+        can_delete=True,
+        extra=1,
+    ),
+    prefix="annotations",
+)
+
+
+class RuleOverrideForm(forms.Form):
+    content_type = forms.ChoiceField(choices=[(x, x) for x in ["service", "project"]])
     object_id = forms.IntegerField()
 
 
 class FarmForm(forms.ModelForm):
     class Meta:
         model = models.Farm
-        exclude = ['source']
+        exclude = ["source", "project"]
 
 
 class SenderForm(forms.ModelForm):
-    sender = forms.ChoiceField(choices=[
-        (entry.module_name, entry.module_name) for entry in plugins.notifications()
-    ])
+    sender = forms.ChoiceField(
+        choices=[(entry.module_name, entry.module_name) for entry in plugins.notifications()]
+    )
 
     class Meta:
         model = models.Sender
-        exclude = ['content_type', 'object_id', 'owner', 'enabled']
+        exclude = ["content_type", "object_id", "owner", "enabled"]
 
 
 class NotifierUpdate(forms.ModelForm):
     class Meta:
         model = models.Sender
-        exclude = ['value']
+        exclude = ["value"]
 
 
 class HostForm(forms.Form):
@@ -187,23 +347,174 @@ class HostForm(forms.Form):
         self.cleaned_data["hosts"] = list(hosts)
 
 
-LabelFormset = forms.inlineformset_factory(
-    models.Rule,
-    models.RuleLabel,
-    fields=("name", "value"),
-    widgets={
-        "name": forms.TextInput(attrs={"class": "form-control"}),
-        "value": forms.TextInput(attrs={"rows": 5, "class": "form-control"}),
-    },
-)
+def get_permission_choices(input_object):
+    permissions = get_perms_for_model(input_object)
+    for permission in permissions.filter(name__in=["Admin", "Editor", "Viewer", "Member"]):
+        yield (permission.codename, permission.name)
 
 
-AnnotationFormset = forms.inlineformset_factory(
-    models.Rule,
-    models.RuleAnnotation,
-    fields=("name", "value"),
-    widgets={
-        "name": forms.TextInput(attrs={"class": "form-control"}),
-        "value": forms.Textarea(attrs={"rows": 2, "class": "form-control"}),
-    },
-)
+def get_group_choices():
+    yield ("", "")
+    for g in models.Group.objects.order_by("name"):
+        yield (g.name, g.name)
+
+
+def get_user_choices():
+    # Add an empty choice to trigger the Select2 placeholder
+    yield ("", "")
+
+    for u in (
+        User.objects.filter(is_active=True)
+        .exclude(username=ANONYMOUS_USER_NAME)
+        .order_by("username")
+    ):
+        full_name = f"{u.first_name} {u.last_name}".strip()
+        if full_name and u.email:
+            yield (u.username, f"{u.username} ({full_name})({u.email})")
+        elif full_name:
+            yield (u.username, f"{u.username} ({full_name})")
+        elif u.email:
+            yield (u.username, f"{u.username} ({u.email})")
+        else:
+            yield (u.username, u.username)
+
+
+class UserPermissionForm(forms.Form):
+    permission = forms.ChoiceField(
+        required=True,
+        label="Role",
+        widget=forms.Select(attrs={"class": "form-control"}),
+    )
+
+    username = forms.ChoiceField(
+        required=False,
+        label="Username",
+    )
+
+    group = forms.ChoiceField(
+        required=False,
+        label="Group",
+    )
+
+    def __init__(self, *args, **kwargs):
+        input_object = kwargs.pop("input_object", None)
+        super(UserPermissionForm, self).__init__(*args, **kwargs)
+        if input_object:
+            self.fields["permission"].choices = get_permission_choices(input_object)
+        self.fields["username"].choices = get_user_choices()
+        self.fields["group"].choices = get_group_choices()
+
+
+class GroupMemberForm(forms.Form):
+    permission = forms.ChoiceField(
+        required=True,
+        label="Role",
+    )
+
+    users = forms.MultipleChoiceField(
+        required=True,
+        label="Users",
+    )
+
+    def __init__(self, *args, **kwargs):
+        input_object = kwargs.pop("input_object", None)
+        super(GroupMemberForm, self).__init__(*args, **kwargs)
+        if input_object:
+            self.fields["permission"].choices = get_permission_choices(input_object)
+        self.fields["users"].choices = get_user_choices()
+
+
+class UserMergeForm(forms.Form):
+    user_to_merge_from = forms.ChoiceField(required=True)
+    user_to_merge_into = forms.ChoiceField(required=True)
+
+    def __init__(self, *args, **kwargs):
+        super(UserMergeForm, self).__init__(*args, **kwargs)
+        self.fields["user_to_merge_from"].choices = get_user_choices()
+        self.fields["user_to_merge_from"].label = _(
+            "User to merge from (This account will be deleted)"
+        )
+        self.fields["user_to_merge_into"].choices = get_user_choices()
+        self.fields["user_to_merge_into"].label = _(
+            "User to merge into (This account will be kept)"
+        )
+
+    def clean(self):
+        cleaned_data = super().clean()
+        user_to_merge_from = cleaned_data.get("user_to_merge_from")
+        user_to_merge_into = cleaned_data.get("user_to_merge_into")
+
+        if user_to_merge_from == user_to_merge_into:
+            raise ValidationError(
+                _("The user to merge from and the user to merge into must be different.")
+            )
+
+        return cleaned_data
+
+
+class TokenGenerationForm(forms.Form):
+    default_name = forms.CharField(required=False, widget=forms.HiddenInput())
+    name = forms.CharField(max_length=64, required=False, help_text=_("Token name (max 64 chars)"))
+    user_timezone = forms.CharField(required=False, widget=forms.HiddenInput())
+    expiration = forms.DateTimeField(
+        required=bool(settings.API_TOKEN_TTL_DAYS),
+        widget=forms.DateInput(
+            attrs={"type": "date", "max_expiration_in_days": settings.API_TOKEN_TTL_DAYS}
+        ),
+    )
+
+    def __init__(self, *args, **kwargs):
+        super(TokenGenerationForm, self).__init__(*args, **kwargs)
+        default_name = f"{get_current_user().username}-{uuid.uuid4()}"
+        self.initial["default_name"] = default_name
+        self.fields["name"].widget.attrs["placeholder"] = default_name
+
+        if settings.API_TOKEN_TTL_DAYS:
+            self.fields["expiration"].help_text = _(
+                "Token expiration (max %d days)" % settings.API_TOKEN_TTL_DAYS
+            )
+        else:
+            self.fields["expiration"].help_text = _(
+                "Token expiration. Leave blank for no expiration."
+            )
+
+    def clean_name(self):
+        if not self.cleaned_data["name"]:
+            return self.cleaned_data["default_name"]
+        return self.cleaned_data["name"]
+
+    def clean_expiration(self):
+        if not self.cleaned_data["expiration"]:
+            return None
+
+        now = timezone.now()
+        if self.cleaned_data["user_timezone"]:
+            user_tz = ZoneInfo(self.cleaned_data["user_timezone"])
+            now = now.astimezone(user_tz)
+            self.cleaned_data["expiration"] = self.cleaned_data["expiration"].replace(
+                tzinfo=user_tz
+            )
+
+        # User only selects a date, so we need to set the time to the current
+        self.cleaned_data["expiration"] = self.cleaned_data["expiration"].replace(
+            hour=now.hour, minute=now.minute, second=now.second
+        )
+
+        if self.cleaned_data["expiration"]:
+            if self.cleaned_data["expiration"] < now:
+                raise ValidationError(_("Expiration date cannot be in the past."))
+            if settings.API_TOKEN_TTL_DAYS:
+                max_expiration = now + datetime.timedelta(days=settings.API_TOKEN_TTL_DAYS)
+                if self.cleaned_data["expiration"] > max_expiration:
+                    raise ValidationError(
+                        _("Expiration date cannot be more than %d days in the future.")
+                        % settings.API_TOKEN_TTL_DAYS
+                    )
+
+        return self.cleaned_data["expiration"]
+
+
+class PromgenAuthTokenCreateForm(AuthTokenCreateForm):
+    class Meta:
+        model = models.AuthToken
+        fields = ("name", "user", "expiry")

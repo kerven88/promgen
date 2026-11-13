@@ -3,11 +3,67 @@
 {% block content %}
 
 
-<div class="page-header">
+<div class="page-header" v-pre>
   <h1>{{user.username}} ({{user.email}})</h1>
 </div>
 
 <div class="panel panel-primary">
+  <div class="panel-heading">API Tokens</div>
+  <table class="table">
+    <tr>
+      <th v-pre>Name</th>
+      <th>Created At</th>
+      <th>Expires At</th>
+      <th>Actions</th>
+    </tr>
+    {% for token in api_tokens %}
+    <tr>
+      <td>{{ token.name }}</td>
+      <td><span v-text="time('{{ token.created|date:'c' }}')"></span></td>
+      <td>
+        {% if token.expiry %}
+          <span v-text="time('{{ token.expiry|date:'c' }}')"></span>
+          {% if token.is_expired %}
+            <span class="label label-danger">Expired</span>
+          {% endif %}
+        {% else %}
+          <span class="label label-primary">No Expiration</span>
+        {% endif %}
+      </td>
+      <td>
+        <form
+          method="post"
+          action="{% url 'token-delete' %}"
+          style="display: inline"
+          onsubmit="return confirm('{% trans 'Are you sure?' %}')"
+        >
+          {% csrf_token %}
+          <input type="hidden" name="digest" value="{{ token.digest }}" />
+          <button class="btn btn-danger btn-xs">
+            Delete
+          </button>
+        </form>
+      </td>
+    </tr>
+    {% endfor %}
+    <tr>
+      {% if not api_quota or api_tokens|length < api_quota %}
+      <td colspan="4">
+        <a href="{% url 'token-generate' %}">{% translate "Generate New Token" %}</a>
+      </td>
+      {% else %}
+      <td colspan="4">
+        <p class="text-danger">
+          You have reached the maximum number of API tokens allowed ({{api_quota}}).
+          Please delete an existing token before creating a new one.
+        </p>
+      </td>
+      {% endif %}
+    </tr>
+  </table>
+</div>
+
+<div class="panel panel-primary" v-pre>
   <div class="panel-heading">Subscriptions</div>
   <table class="table">
     <tr>
@@ -50,7 +106,7 @@
 <div class="panel panel-primary">
   <div class="panel-heading">Notifications</div>
   {% include "promgen/notifier_block.html" with object=notifiers show_edit=1 %}
-  <div class="panel-body">
+  <div class="panel-body" v-pre>
     <div class="row">
       <div class="col-md-3">
         <ul class="nav nav-pills nav-stacked" role="tablist">
@@ -89,7 +145,7 @@
 </div>
 
 {% if user.is_staff %}
-<div class="panel panel-warning">
+<div class="panel panel-warning" v-pre>
   <div class="panel-heading">Debug</div>
   <table class="table">
     <tr>

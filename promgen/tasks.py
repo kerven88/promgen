@@ -3,18 +3,44 @@
 import collections
 import logging
 import os
-from urllib.parse import urljoin
+import socket
+from datetime import datetime
 
 from atomicwrites import atomic_write
-from celery import shared_task
+from billiard.exceptions import SoftTimeLimitExceeded
+from celery import Task, shared_task
 from requests.exceptions import RequestException
 
-from promgen import models, prometheus, util, notification
+from promgen import metrics, models, notification, prometheus, settings, util
 
 logger = logging.getLogger(__name__)
 
 
-@shared_task
+class BaseTaskWithRetry(Task):
+    """
+    Base task that retries indefinitely on SoftTimeLimitExceeded.
+
+    Retry backoff have a fixed value of 5 seconds and no jitter, so that the retry delay time will
+    be consistent and increased following the Exponential backoff algorithm after multiple retries.
+
+    Celery does not natively support dead-letter queues (DLQs) when using Redis as a broker, so we
+    implemented a custom solution within our Promgen tasks to handle retried tasks. When enabled,
+    retried tasks will be routed to a queue named "promgen_dlq" for further inspection and handling.
+    Otherwise, retried tasks will be sent back to the original queue. By default, this feature is
+    disabled. To handle retried tasks in the DLQ, you can set up a separate worker that listens to
+    the "promgen_dlq" queue by using the following command:
+        celery -A promgen worker -l info --queues promgen_dlq
+    """
+
+    autoretry_for = (SoftTimeLimitExceeded,)
+    max_retries = None  # Retry indefinitely
+    retry_backoff = 5
+    retry_jitter = False
+    if getattr(settings, "CELERY_ENABLE_PROMGEN_DEAD_LETTER_QUEUE", False):
+        retry_kwargs = {"queue": "promgen_dlq"}
+
+
+@shared_task(base=BaseTaskWithRetry)
 def index_alert(alert_pk):
     alert = models.Alert.objects.get(pk=alert_pk)
     labels = alert.json.get("commonLabels")
@@ -22,7 +48,7 @@ def index_alert(alert_pk):
         models.AlertLabel.objects.create(alert=alert, name=name, value=value)
 
 
-@shared_task
+@shared_task(base=BaseTaskWithRetry)
 def process_alert(alert_pk):
     """
     Process alert for routing and notifications
@@ -60,7 +86,7 @@ def process_alert(alert_pk):
                 logger.debug("Filtered out sender %s", sender)
                 continue
             if hasattr(sender.driver, "splay"):
-                for splay in sender.driver.splay(sender.value):
+                for splay in sender.driver.splay(sender.value, enabled=True):
                     senders[splay.sender].add(splay.value)
             else:
                 senders[sender.sender].add(sender.value)
@@ -70,7 +96,7 @@ def process_alert(alert_pk):
             send_notification.delay(driver, target, data, alert_pk=alert.pk)
 
 
-@shared_task
+@shared_task(base=BaseTaskWithRetry)
 def send_alert(sender, target, data):
     """
     Send alert to specific target
@@ -96,7 +122,7 @@ def send_alert(sender, target, data):
         raise
 
 
-@shared_task
+@shared_task(base=BaseTaskWithRetry)
 def send_notification(*args, alert_pk, **kwargs):
     """
     Send notification to target
@@ -104,35 +130,73 @@ def send_notification(*args, alert_pk, **kwargs):
     This wraps send_alert, but wraps it so that we can keep track
     of the number of sent and error counts
     """
+    started_time = models.Alert.objects.get(pk=alert_pk).created
+    error = None
+
     try:
         send_alert(*args, **kwargs)
     except Exception as e:
+        error = e
         util.inc_for_pk(models.Alert, pk=alert_pk, error_count=1)
         models.AlertError.objects.create(alert_id=alert_pk, message=str(e))
+        if isinstance(e, SoftTimeLimitExceeded):
+            # Allow Celery to handle retry logic
+            raise
     else:
         util.inc_for_pk(models.Alert, pk=alert_pk, sent_count=1)
 
+    finished_time = datetime.now(started_time.tzinfo)
 
-@shared_task
+    # Instrumentation metrics for alert notifications
+    metrics.observe(
+        name="promgen_alert_notifications_total",
+        label_values={
+            "sender_type": args[0],
+            "hostname": socket.gethostname(),
+        },
+        value=1,
+    )
+
+    metrics.observe(
+        name="promgen_alert_notification_duration_seconds",
+        label_values={
+            "status": "success" if not error else "fail",
+            "sender_type": args[0],
+            "hostname": socket.gethostname(),
+        },
+        value=(finished_time - started_time).total_seconds(),
+    )
+
+    if error:
+        metrics.observe(
+            name="promgen_alert_notifications_error_total",
+            label_values={
+                "error_type": util.categorize_error(error),
+                "sender_type": args[0],
+                "hostname": socket.gethostname(),
+            },
+            value=1,
+        )
+
+
+@shared_task(base=BaseTaskWithRetry)
 def reload_prometheus():
     from promgen import signals
 
-    target = urljoin(util.setting("prometheus:url"), "/-/reload")
+    target = util.join_url(util.setting("prometheus:url"), "/-/reload")
     response = util.post(target)
     response.raise_for_status()
     signals.post_reload.send(response)
 
 
-@shared_task
+@shared_task(base=BaseTaskWithRetry)
 def clear_tombstones():
-    target = urljoin(
-        util.setting("prometheus:url"), "/api/v1/admin/tsdb/clean_tombstones"
-    )
+    target = util.join_url(util.setting("prometheus:url"), "/api/v1/admin/tsdb/clean_tombstones")
     response = util.post(target)
     response.raise_for_status()
 
 
-@shared_task
+@shared_task(base=BaseTaskWithRetry)
 def write_urls(path=None, reload=True, chmod=0o644):
     if path is None:
         path = util.setting("prometheus:blackbox")
@@ -144,7 +208,7 @@ def write_urls(path=None, reload=True, chmod=0o644):
         reload_prometheus()
 
 
-@shared_task
+@shared_task(base=BaseTaskWithRetry)
 def write_config(path=None, reload=True, chmod=0o644):
     if path is None:
         path = util.setting("prometheus:targets")
@@ -156,7 +220,7 @@ def write_config(path=None, reload=True, chmod=0o644):
         reload_prometheus()
 
 
-@shared_task
+@shared_task(base=BaseTaskWithRetry)
 def write_rules(path=None, reload=True, chmod=0o644):
     if path is None:
         path = util.setting("prometheus:rules")

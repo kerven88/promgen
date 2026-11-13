@@ -1,17 +1,35 @@
 # Copyright (c) 2019 LINE Corporation
 # These sources are released under the terms of the MIT license: see LICENSE
+import json
+from itertools import chain
 
-from rest_framework import permissions, viewsets
+from django.contrib.contenttypes.models import ContentType
+from django.http import HttpResponse
+from requests.exceptions import HTTPError
+from rest_framework import viewsets
 from rest_framework.decorators import action
 from rest_framework.response import Response
+from rest_framework.views import APIView
 
-from django.http import HttpResponse
-from django.views.generic import View
+from promgen import (
+    filters,
+    models,
+    permissions,
+    prometheus,
+    renderers,
+    serializers,
+    signals,
+    tasks,
+    util,
+)
+from promgen.permissions import PromgenModelPermissions
 
-from promgen import filters, models, prometheus, renderers, serializers, tasks
 
+class AlertReceiver(APIView):
+    permission_classes = [PromgenModelPermissions]
+    permissions_required = ["promgen.process_alert"]
+    any_perm = True
 
-class AlertReceiver(View):
     def post(self, request, *args, **kwargs):
         # Normally it would be more 'correct' to check our 'alert_blacklist' here and avoid
         # writing to the database, but to keep the alert ingestion queue as simple as possible
@@ -23,14 +41,64 @@ class AlertReceiver(View):
 
 
 class AllViewSet(viewsets.ViewSet):
-    permission_classes = [permissions.AllowAny]
-
     @action(detail=False, methods=["get"], renderer_classes=[renderers.RuleRenderer])
     def rules(self, request):
-        rules = models.Rule.objects.filter(enabled=True)
+        site_rules = models.Rule.objects.filter(
+            content_type__model="site", content_type__app_label="promgen", enabled=True
+        )
+        service_rules = models.Rule.objects.filter(
+            content_type__model="service", content_type__app_label="promgen", enabled=True
+        )
+        project_rules = models.Rule.objects.filter(
+            content_type__model="project", content_type__app_label="promgen", enabled=True
+        )
+
+        # If the user is not a superuser, we need to filter the rules by the user's permissions
+        if not self.request.user.is_superuser:
+            services = permissions.get_accessible_services_for_user(self.request.user)
+            service_rules = service_rules.filter(object_id__in=services)
+
+            projects = permissions.get_accessible_projects_for_user(self.request.user)
+            project_rules = project_rules.filter(object_id__in=projects)
+
+        rules = list(chain(site_rules, service_rules, project_rules))
         return Response(
             serializers.AlertRuleSerializer(rules, many=True).data,
             headers={"Content-Disposition": "attachment; filename=alert.rule.yml"},
+        )
+
+    @action(detail=False, methods=["get"], renderer_classes=[renderers.renderers.JSONRenderer])
+    def targets(self, request):
+        if self.request.user.is_superuser:
+            return HttpResponse(
+                prometheus.render_config(),
+                content_type="application/json",
+            )
+
+        # if the user is not a superuser, we need to filter the targets by the user's permissions
+        services = permissions.get_accessible_services_for_user(self.request.user)
+        projects = permissions.get_accessible_projects_for_user(self.request.user)
+        farms = models.Farm.objects.filter(project__in=projects)
+
+        return HttpResponse(
+            prometheus.render_config(services=services, projects=projects, farms=farms),
+            content_type="application/json",
+        )
+
+    @action(detail=False, methods=["get"], renderer_classes=[renderers.renderers.JSONRenderer])
+    def urls(self, request):
+        if self.request.user.is_superuser:
+            return HttpResponse(
+                prometheus.render_urls(),
+                content_type="application/json",
+            )
+
+        # if the user is not a superuser, we need to filter the URLs by the user's permissions
+        projects = permissions.get_accessible_projects_for_user(self.request.user)
+
+        return HttpResponse(
+            prometheus.render_urls(projects=projects),
+            content_type="application/json",
         )
 
 
@@ -38,14 +106,41 @@ class ShardViewSet(viewsets.ModelViewSet):
     queryset = models.Shard.objects.all()
     filterset_class = filters.ShardFilter
     serializer_class = serializers.ShardSerializer
-    lookup_field = 'name'
+    lookup_field = "name"
 
-    @action(detail=True, methods=['get'])
-    def services(self, request, name):
+    @action(detail=True, methods=["get"])
+    def usages(self, request, name):
+        metric = request.query_params.get("metric", None)
+        METRIC_QUERY_MAPPING = {
+            "samples": "sum(scrape_samples_scraped)",
+            "exporters": "count(up)",
+        }
+        if metric not in METRIC_QUERY_MAPPING:
+            return HttpResponse("BAD REQUEST", status=400)
+
         shard = self.get_object()
-        return Response(
-            serializers.ServiceSerializer(shard.service_set.all(), many=True).data
-        )
+        params = {"query": METRIC_QUERY_MAPPING[request.GET["metric"]]}
+        headers = {}
+
+        if shard.authorization:
+            headers["Authorization"] = shard.authorization
+
+        try:
+            response = util.get(f"{shard.url}/api/v1/query", params=params, headers=headers)
+            response.raise_for_status()
+        except HTTPError:
+            return util.proxy_error(response)
+
+        return HttpResponse(response.content, content_type="application/json")
+
+    @action(detail=True, methods=["get"])
+    def projects(self, request, name):
+        shard = self.get_object()
+        projects = shard.project_set.all()
+        if not request.user.is_superuser:
+            accessible_projects = permissions.get_accessible_projects_for_user(request.user)
+            projects = projects.filter(pk__in=accessible_projects)
+        return Response(serializers.ProjectSerializer(projects, many=True).data)
 
 
 class RuleMixin:
@@ -62,9 +157,7 @@ class NotifierMixin:
     @action(detail=True, methods=["get"])
     def notifiers(self, request, name):
         return Response(
-            serializers.SenderSerializer(
-                self.get_object().notifiers.all(), many=True
-            ).data
+            serializers.SenderSerializer(self.get_object().notifiers.all(), many=True).data
         )
 
 
@@ -72,21 +165,25 @@ class ServiceViewSet(NotifierMixin, RuleMixin, viewsets.ModelViewSet):
     queryset = models.Service.objects.all()
     filterset_class = filters.ServiceFilter
     serializer_class = serializers.ServiceSerializer
-    lookup_value_regex = '[^/]+'
-    lookup_field = 'name'
+    lookup_value_regex = "[^/]+"
+    lookup_field = "name"
 
-    @action(detail=True, methods=['get'])
-    def projects(self, request, name):
-        service = self.get_object()
-        return Response(
-            serializers.ProjectSerializer(service.project_set.all(), many=True).data
+    def get_queryset(self):
+        query_set = self.queryset
+        return query_set.filter(
+            pk__in=permissions.get_accessible_services_for_user(self.request.user)
         )
 
-    @action(detail=True, methods=['get'])
+    @action(detail=True, methods=["get"])
+    def projects(self, request, name):
+        service = self.get_object()
+        return Response(serializers.ProjectSerializer(service.project_set.all(), many=True).data)
+
+    @action(detail=True, methods=["get"])
     def targets(self, request, name):
         return HttpResponse(
             prometheus.render_config(service=self.get_object()),
-            content_type='application/json',
+            content_type="application/json",
         )
 
 
@@ -94,13 +191,125 @@ class ProjectViewSet(NotifierMixin, RuleMixin, viewsets.ModelViewSet):
     queryset = models.Project.objects.prefetch_related("service", "shard", "farm")
     filterset_class = filters.ProjectFilter
     serializer_class = serializers.ProjectSerializer
-    lookup_value_regex = '[^/]+'
-    lookup_field = 'name'
+    lookup_value_regex = "[^/]+"
+    lookup_field = "name"
 
-    @action(detail=True, methods=['get'])
+    def get_queryset(self):
+        query_set = self.queryset
+        return query_set.filter(
+            pk__in=permissions.get_accessible_projects_for_user(self.request.user)
+        )
+
+    @action(detail=True, methods=["get"])
     def targets(self, request, name):
         return HttpResponse(
             prometheus.render_config(project=self.get_object()),
-            content_type='application/json',
+            content_type="application/json",
         )
 
+
+class FarmViewSet(viewsets.ModelViewSet):
+    queryset = models.Farm.objects.all()
+    filterset_class = filters.FarmFilter
+    serializer_class = serializers.FarmSerializer
+    lookup_value_regex = "[^/]+"
+    lookup_field = "id"
+
+    def get_queryset(self):
+        query_set = self.queryset
+        # If the user is not a superuser, we need to filter the farms by the user's permissions
+        if not self.request.user.is_superuser:
+            projects = permissions.get_accessible_projects_for_user(self.request.user)
+            query_set = query_set.filter(project__in=projects)
+        return query_set
+
+    def retrieve(self, request, id):
+        farm = self.get_object()
+        farm_data = self.get_serializer(farm).data
+
+        hosts = farm.host_set.all()
+        hosts_data = serializers.HostSerializer(hosts, many=True).data
+        farm_detail = {**farm_data, "hosts": hosts_data}
+        return Response(farm_detail)
+
+
+class ApiConfig(APIView):
+    permission_classes = [PromgenModelPermissions]
+    any_perm = True
+
+    def get_permissions(self):
+        self.permissions_required = {
+            "GET": ["promgen.read_config"],
+            "POST": ["promgen.import_config"],
+        }.get(self.request.method, [])
+        return super().get_permissions()
+
+    def get(self, request):
+        return HttpResponse(prometheus.render_config(), content_type="application/json")
+
+    def post(self, request, *args, **kwargs):
+        try:
+            body = json.loads(request.body.decode("utf-8"))
+
+            prometheus.import_config(body, self.request.user, **kwargs)
+        except Exception as e:
+            return HttpResponse(e, status=400)
+
+        return HttpResponse("Success", status=202)
+
+
+class ApiQueue(APIView):
+    permission_classes = [PromgenModelPermissions]
+    permissions_required = ["promgen.reload_config"]
+    any_perm = True
+
+    def post(self, request):
+        signals.trigger_write_config.send(request)
+        signals.trigger_write_rules.send(request)
+        signals.trigger_write_urls.send(request)
+        return HttpResponse("OK", status=202)
+
+
+class _ExportRules(APIView):
+    permission_classes = [PromgenModelPermissions]
+    permissions_required = ["promgen.read_config"]
+    any_perm = True
+
+    def format(self, rules=None, name="promgen"):
+        content = prometheus.render_rules(rules)
+        response = HttpResponse(content)
+        response["Content-Type"] = "application/x-yaml"
+        response["Content-Disposition"] = "attachment; filename=%s.rule.yml" % name
+        return response
+
+
+class RulesConfig(_ExportRules):
+    def get(self, request):
+        return self.format()
+
+
+class RuleExport(_ExportRules):
+    def get(self, request, content_type, object_id):
+        ct = ContentType.objects.get(
+            app_label="promgen", model=content_type
+        ).get_object_for_this_type(pk=object_id)
+        rules = models.Rule.objects.filter(obj=ct)
+        return self.format(rules)
+
+
+class URLConfig(APIView):
+    permission_classes = [PromgenModelPermissions]
+
+    def get_permissions(self):
+        self.permissions_required = {
+            "GET": ["promgen.read_config"],
+            "POST": ["promgen.reload_config"],
+        }.get(self.request.method, [])
+        return super().get_permissions()
+
+    def get(self, request):
+        return HttpResponse(prometheus.render_urls(), content_type="application/json")
+
+    def post(self, request):
+        tasks.write_urls()
+        return HttpResponse("OK", status=202)

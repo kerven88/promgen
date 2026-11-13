@@ -1,68 +1,65 @@
 {% extends "base.html" %}
 {% load i18n %}
+{% load promgen %}
 
 {% block content %}
+{% current_role farm as role %}
 
-<div class="page-header">
-  <h1>Farm: {{ farm.name }} ({{ farm.source }})</h1>
-</div>
-
-<ol class="breadcrumb">
-  <li><a href="{% url 'service-list' %}">Home</a></li>
-  <li><a href="{% url 'farm-list' %}">Farms</a></li>
-  <li class="active"><a href="{% url 'farm-detail' farm.id %}">{{ farm.name }}</a></li>
-</ol>
-
-<div class="row">
-
-<div class="col-md-6">
-  <div class="panel panel-default">
-    <div class="panel-heading">Hosts from {{ farm.name }} ({{ farm.source }})</div>
-    <table class="table">
-      <tr>
-        <th>Name</th>
-      {% if farm.editable %}
-        <th>&nbsp;</th>
-      {% endif %}
-      </tr>
-    {% for host in farm.host_set.all %}
-      <tr>
-        <td><a href="{% url 'host-detail' host.name %}">{{ host.name }}</a></td>
-        {% if farm.editable %}
-        <td>
-          <form method="post" action="{% url 'host-delete' host.id %}" onsubmit="return confirm('Really delete this host?');">
-            {% csrf_token %}
-          <button name="delete" type="submit" class="btn btn-danger">Delete</button>
-          </form>
-        </td>
-        {% endif %}
-      </tr>
-    {% endfor %}
-    </table>
-
-    <div class="panel-footer">
+<div class="page-header promgen-flex-space-between-center" v-pre>
+  <div>
+    <h1>
+      Farm: {{ farm.name }} ({{ farm.source }})
+    </h1>
+  </div>
   {% if farm.editable %}
-      <a href="{% url 'hosts-add' farm.id %}" class="btn btn-primary">{% trans "Register Hosts" %}</a>
-  {% endif %}
-    <form method="post" action="{% url 'farm-delete' farm.id %}" onsubmit="return confirm('Delete this farm?')" style="display: inline">
-      {% csrf_token %}
-      <button class="btn btn-danger">Delete Farm</button>
-    </form>
+    {% if role == "ADMIN" or role == "EDIT" %}
+    <div>
+      <a href="{% url 'farm-update' farm.id %}" class="btn btn-warning btn-sm">{% translate "Edit Farm" %}</a>
+      <form
+        method="post"
+        action="{% url 'farm-delete' farm.id %}"
+        onsubmit="return confirm('{% trans 'Are you sure you want to delete this farm? This action is permanent and cannot be undone.' %}')"
+        style="display: inline"
+      >
+        {% csrf_token %}
+        <button class="btn btn-danger btn-sm">{% trans "Delete Farm" %}</button>
+      </form>
     </div>
-  </div>
+    {% endif %}
+  {% endif %}
 </div>
 
-<div class="col-md-6">
-  <div class="panel panel-default">
-    <div class="panel-heading">Projects using {{ farm.name }} ({{ farm.source }})</div>
-    <table class="table">
-{% for project in farm.project_set.all %}
-      <tr>
-        <td><a href="{% url 'project-detail' project.id %}">{{ project.name }}</a></td>
-      </tr>
-{% endfor %}
-    </table>
+{% breadcrumb farm %}
+
+<div v-pre>
+
+<div class="panel panel-default">
+  <div class="panel-heading">Hosts</div>
+  <table class="table">
+  {% for host in farm.host_set.all %}
+    <tr>
+      <td><a href="{% url 'host-detail' host.name %}">{{ host.name }}</a></td>
+      {% if farm.editable %}
+      {% if role == "ADMIN" or role == "EDIT" %}
+      <td style="width: 0; min-width: fit-content;">
+        <form method="post" action="{% url 'host-delete' host.id %}" onsubmit="return confirm('Really delete this host?');">
+          {% csrf_token %}
+        <button name="delete" type="submit" class="btn btn-danger btn-sm">Delete</button>
+        </form>
+      </td>
+      {% endif %}
+      {% endif %}
+    </tr>
+  {% endfor %}
+  </table>
+
+{% if farm.editable %}
+  {% if role == "ADMIN" or role == "EDIT" %}
+  <div class="panel-footer">
+    <a href="{% url 'hosts-add' farm.id %}" class="btn btn-primary">{% trans "Register Hosts" %}</a>
   </div>
+  {% endif %}
+{% endif %}
 </div>
 
 </div>

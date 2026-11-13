@@ -2,10 +2,11 @@
 # These sources are released under the terms of the MIT license: see LICENSE
 
 import logging
+import os
+import warnings
 
 from django.apps import AppConfig
 from django.db.models.signals import post_migrate
-import warnings
 
 logger = logging.getLogger(__name__)
 
@@ -13,29 +14,31 @@ logger = logging.getLogger(__name__)
 def default_admin(sender, interactive, **kwargs):
     # Have to import here to ensure that the apps are already registered and
     # we get a real model instead of __fake__.User
+
     from django.contrib.auth.models import User
+
     if User.objects.filter(is_superuser=True).count() == 0:
         if interactive:
-            print('  Adding default admin user')
+            print("  Adding default admin user")
         User.objects.create_user(
-            username='admin',
-            password='admin',
+            username="admin",
+            password=os.getenv("PROMGEN_ADMIN_PASSWORD", "admin"),
             is_staff=True,
             is_active=True,
             is_superuser=True,
         )
-        if interactive:
-            print('BE SURE TO UPDATE THE PASSWORD!!!')
+        if interactive and "PROMGEN_ADMIN_PASSWORD" not in os.environ:
+            print("BE SURE TO UPDATE THE PASSWORD!!!")
 
 
 def default_shard(sender, apps, interactive, **kwargs):
-    Shard = apps.get_model('promgen.Shard')
+    Shard = apps.get_model("promgen.Shard")
     if Shard.objects.count() == 0:
         if interactive:
-            print('  Adding default shard')
+            print("  Adding default shard")
         Shard.objects.create(
-            name='Default',
-            url='http://prometheus.example.com',
+            name="Default",
+            url="http://prometheus.example.com",
             proxy=True,
             enabled=True,
         )
@@ -56,7 +59,7 @@ class PromgenConfig(AppConfig):
     default_auto_field = "django.db.models.AutoField"
 
     def ready(self):
-        from promgen import checks, signals  # NOQA
+        from promgen import celery, checks, signals  # NOQA
 
         post_migrate.connect(default_shard, sender=self)
         post_migrate.connect(default_admin, sender=self)

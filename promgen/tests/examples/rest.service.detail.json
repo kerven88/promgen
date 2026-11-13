@@ -1,0 +1,10 @@
+{
+  "description": "",
+  "id": 1,
+  "name": "test-service",
+  "owner": "admin",
+  "owner_id": 1,
+  "custom_labels": {
+    "test_label": "test_labelvalue"
+  }
+}

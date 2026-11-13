@@ -1,12 +1,13 @@
 {% extends "base.html" %}
 {% load promgen %}
 {% load tz %}
+{% load i18n %}
 {% block content %}
 {% breadcrumb alert %}
 
 <ul class="list-unstyled">
     {% for error in alert.alerterror_set.all %}
-    <li class="alert alert-danger" role="alert">
+    <li class="alert alert-danger" role="alert" v-pre>
         <span class="glyphicon glyphicon-alert" aria-hidden="true"></span>
         {{error.message}}
         <span class="pull-right">{{error.created}}</span>
@@ -17,9 +18,9 @@
 <h2>Routing</h2>
 <dl class="dl-horizontal">
     {% for label, value in groupLabels.items %}
-    <dt>{{label}}</dt>
+    <dt v-pre>{{label}}</dt>
     <dd>
-        <a class="label label-warning" href="{% url 'alert-list' %}?{{label}}={{value}}">{{value}}</a>
+        <a class="label label-warning" href="{% url 'alert-list' %}?{{label}}={{value}}" v-pre>{{value}}</a>
         {% if label in redirects %}
         <a href="{% url 'search' %}?var-{{label}}={{value}}">Search</a>
         {% endif %}
@@ -34,9 +35,9 @@
 <h2>Additional Common Labels</h2>
 <dl class="dl-horizontal">
     {% for label, value in otherLabels.items %}
-    <dt>{{label}}</dt>
+    <dt v-pre>{{label}}</dt>
     <dd>
-        <a class="label label-warning" href="{% url 'alert-list' %}?{{label}}={{value}}">{{value}}</a>
+        <a class="label label-warning" href="{% url 'alert-list' %}?{{label}}={{value}}" v-pre>{{value}}</a>
         {% if label in redirects %}
         <a href="{% url 'search' %}?var-{{label}}={{value}}">Search</a>
         {% endif %}
@@ -47,12 +48,12 @@
 <h2>Common Annotations</h2>
 <dl class="dl-horizontal">
     {% for label, value in data.commonAnnotations.items %}
-    <dt>{{label}}</dt>
-    <dd>{{value|urlize}}</dd>
+    <dt v-pre>{{label}}</dt>
+    <dd v-pre>{{value|urlize}}</dd>
     {% endfor %}
     {% if data.externalURL %}
     <dt>External URL</dt>
-    <dd>{{data.externalURL|urlizetrunc:100}}</dd>
+    <dd v-pre>{{data.externalURL|urlizetrunc:100}}</dd>
     {% endif %}
 </dl>
 
@@ -62,24 +63,39 @@
         <th>Start Time</th>
         <th>Labels</th>
         <th>Link</th>
+        <th>Action</th>
     </tr>
     {% for alert in data.alerts %}
     <tr>
-        <td>{{alert.startsAt}}</td>
+        <td v-pre>{{alert.startsAt}}</td>
         <td>
             <ul>
                 {% for k,v in alert.labels.items|dictsort:0 %}
-                <a class="label label-warning" href="{% url 'alert-list' %}?{{k}}={{v}}">{{k}}:{{v}}</a>
+                <a class="label label-warning" href="{% url 'alert-list' %}?{{k}}={{v}}" v-pre>{{k}}:{{v}}</a>
                 {% endfor %}
             </ul>
         </td>
-        <td>{{alert.generatorURL|urlizetrunc:100}}</td>
+        <td v-pre>{{alert.generatorURL|urlizetrunc:100}}</td>
+        <td>
+            <a @click="setSilenceLabels({{alert.labels}})" class="btn btn-warning btn-xs">
+                {% trans "Silence" %}
+            </a>
+        </td>
     </tr>
     {% endfor %}
 </table>
 
-<details>
-    <summary>Raw Data</summary>
-    <pre>{{alert.json|pretty_json}}</pre>
-</details>
+<a data-toggle="modal" href="#raw-data">
+    Raw Data
+    <span class="glyphicon glyphicon-new-window" aria-hidden="true"></span>
+</a>
+<div class="modal fade" role="dialog" id="raw-data">
+    <div class="modal-dialog">
+        <div class="modal-content">
+            <div class="modal-body">
+                <pre v-pre>{{alert.json|pretty_json}}</pre>
+            </div>
+        </div>
+    </div>
+</div>
 {% endblock %}

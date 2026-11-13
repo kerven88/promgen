@@ -4,9 +4,9 @@
 import re
 
 from dateutil import parser
-
 from django.core.exceptions import ValidationError
 from django.core.validators import RegexValidator, URLValidator
+from django.utils.translation import gettext as _
 
 # See definition of duration field
 # https://prometheus.io/docs/prometheus/latest/configuration/configuration/#configuration-file
@@ -19,16 +19,48 @@ duration = RegexValidator(
 # Label Value Definition
 # https://prometheus.io/docs/concepts/data_model/#metric-names-and-labels
 metricname = RegexValidator(
-    r"[a-zA-Z_:][a-zA-Z0-9_:]*", "Only alphanumeric characters are allowed."
+    r"^[a-zA-Z_:][a-zA-Z0-9_:]*$",
+    "Only alphanumeric characters are allowed.",
 )
 labelname = RegexValidator(
-    r"[a-zA-Z_][a-zA-Z0-9_]*", "Only alphanumeric characters are allowed."
+    r"^[a-zA-Z_][a-zA-Z0-9_]*$",
+    "Only alphanumeric characters are allowed.",
 )
+
+RESERVED_LABEL_NAMES = [
+    "description",
+    "farm",
+    "id",
+    "job",
+    "name",
+    "owner",
+    "owner_id",
+    "pk",
+    "project",
+    "service",
+    "service_id",
+    "shard",
+    "shard_id",
+]
+
+
+def custom_label_name(value):
+    # Custom labels also follow the basic label rules
+    labelname(value)
+
+    if value.startswith("__"):
+        raise ValidationError("Custom label name cannot start with __")
+
+    # Custom labels cannot reuse default label names and existing model's fields.
+    if value in RESERVED_LABEL_NAMES:
+        reserved_values = ", ".join(RESERVED_LABEL_NAMES)
+        raise ValidationError(f"Custom label name cannot be one of: {reserved_values}.")
+
 
 # While Prometheus accepts label values of any unicode character, our values sometimes
 # make it into URLs, so we want to make sure we do not have stray / characters
 labelvalue = RegexValidator(
-    r"^[\w][- \w]+\Z", "Unicode letters, numbers, underscores, or hyphens or spaces"
+    r"^[\w][- \w]+$", "Unicode letters, numbers, underscores, or hyphens or spaces"
 )
 
 hostname = RegexValidator(
@@ -45,9 +77,45 @@ hostname = RegexValidator(
     flags=re.IGNORECASE,
 )
 
+# The default URLValidator would consider following schemas valid: ['http', 'https', 'ftp', 'ftps'].
+# However, we only want to allow http and https URLs to be scraped, since Prometheus cannot directly
+# scrape ftp target.
+scraped_url = URLValidator(
+    schemes=["http", "https"],
+)
+
+# https://support.pagerduty.com/main/docs/api-access-keys
+integration_key = RegexValidator(
+    regex=r"^[a-zA-Z0-9]{32}$",
+    message="Integration Key must be 32 alphanumeric characters.",
+)
+
 
 def datetime(value):
     try:
         parser.parse(value)
     except ValueError:
         raise ValidationError("Invalid timestamp")
+
+
+def validate_utf8(value):
+    try:
+        value.encode("utf-8").decode("utf-8")
+    except (UnicodeEncodeError, UnicodeDecodeError):
+        raise ValidationError("Invalid UTF-8 string.")
+
+
+def validate_assign_perm(user, object, permission):
+    if not user.is_active:
+        raise ValidationError(_("Cannot assign permissions to an inactive user."))
+    if user == object.owner and permission not in ["service_admin", "project_admin"]:
+        raise ValidationError(
+            _("Cannot assign permission for the owner. The owner must have the ADMIN role.")
+        )
+
+
+def validate_remove_perm(user, object):
+    if user == object.owner:
+        raise ValidationError(
+            _("Cannot remove permissions for the owner. Please transfer ownership first.")
+        )

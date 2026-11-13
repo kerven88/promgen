@@ -1,10 +1,16 @@
 {% load i18n %}
 
 <td class="col-xs-1">
-    <a :href="alert.generatorURL">[[alert.startsAt|time]]</a>
+    <a :href="alert.generatorURL">[[time(alert.startsAt)]]</a>
 </td>
 <td>
     <dl class="dl-horizontal">
+        <template v-if="alert.promgen && alert.promgen.warnings">
+            <template v-for="message in alert.promgen.warnings">
+                <dt><span class="glyphicon glyphicon-warning-sign"></span></dt>
+                <dd class="text-warning">[[message]]</dd>
+            </template>
+        </template>
         <dt>Labels</dt>
         <dd>
             <ul class="list-inline">
@@ -15,7 +21,7 @@
         </dd>
         <template v-for="(value, annotation) in alert.annotations" class="dl-horizontal">
             <dt>[[annotation]]</dt>
-            <dd :inner-html.prop="value|urlize"></dd>
+            <dd v-html="urlize(value)"></dd>
         </template>
     </dl>
 </td>

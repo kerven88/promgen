@@ -1,0 +1,60 @@
+{% extends "base.html" %}
+{% load promgen %}
+  {% block content %}
+    <div class="page-header promgen-flex-space-between-center">
+      <h1>API v2 Specification</h1>
+      <a href="{% url 'api-v2:schema' %}" download class="btn btn-primary btn-sm mb-4">
+        Download API Schema
+      </a>
+    </div>
+{% breadcrumb label="API v2" %}
+{% if not api_tokens %}
+<p class="alert alert-warning" role="alert">
+  No API Token. Please access the <a href="{% url 'profile' %}">Profile</a> page to generate one.
+</p>
+{% else %}
+<div class="panel panel-default">
+  <div class="panel-body">
+    <form id="api-token-form" class="form-inline" onsubmit="return false;">
+      <input
+        id="api-token-input"
+        type="text"
+        class="form-control"
+        placeholder="Enter API token"
+        required
+      />
+      <button id="api-token-button" class="btn btn-primary btn-sm">SET</button>
+      <span id="api-token-label" class="text-success ml-2"></span>
+    </form>
+  </div>
+</div>
+{% endif %}
+
+<div class="panel panel-default">
+  <div class="panel-body">
+    <rapi-doc
+            id="rapidoc"
+            allow-authentication="false"
+            allow-server-selection="false"
+            api-key-location="header"
+            api-key-name="Authorization"
+            api-key-value="Token"
+            bg-color="#ffffff"
+            mono-font="monospace"
+            nav-bg-color="#f5f5f5"
+            primary-color="#0d6efd"
+            regular-font="inherit"
+            schema-description-expanded="true"
+            show-curl-before-try="true"
+            show-header="false"
+            show-info="false"
+            show-method-in-nav-bar="as-colored-text"
+            sort-endpoints-by="method"
+            sort-tags="true"
+            spec-url="{% url 'api-v2:schema' %}"
+            theme="light"
+    >
+    </rapi-doc>
+  </div>
+</div>
+  {% endblock %}

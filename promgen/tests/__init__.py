@@ -1,13 +1,13 @@
 # Copyright (c) 2017 LINE Corporation
 # These sources are released under the terms of the MIT license: see LICENSE
-
+import csv
 import json
-from django.urls import reverse
-import yaml
 
+import yaml
+from django.conf import settings
 from django.contrib.auth.models import Permission, User
 from django.test import TestCase
-from django.conf import settings
+from django.urls import reverse
 
 
 class Data:
@@ -26,18 +26,21 @@ class Data:
         with self.path.open() as fp:
             return fp.read()
 
+    def csv(self):
+        with self.path.open(newline="", encoding="utf-8") as handle:
+            return list(csv.DictReader(handle))
+
 
 class PromgenTest(TestCase):
     longMessage = True
+    maxDiff = None
     fixtures = ["testcases.yaml"]
 
     def fireAlert(self, source="alertmanager.json", data=None):
         if data is None:
             data = Data("examples", source).raw()
 
-        return self.client.post(
-            reverse("alert"), data=data, content_type="application/json"
-        )
+        return self.client.post(reverse("alert"), data=data, content_type="application/json")
 
     def assertRoute(self, response, view, status=200, msg=None):
         self.assertEqual(response.status_code, status, msg)
@@ -59,7 +62,7 @@ class PromgenTest(TestCase):
         # We split them here, instead of passing to assertEquals, so that we have
         # the arguments directly and not a call() object
         call_args, call_kwargs = mock_func.call_args
-        self.assertEquals((call_args, call_kwargs), (args, kwargs))
+        self.assertEqual((call_args, call_kwargs), (args, kwargs))
 
     def add_user_permissions(self, *args, user=None):
         codenames = [p.split(".")[1] for p in args]

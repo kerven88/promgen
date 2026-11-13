@@ -1,0 +1,18 @@
+[
+    {
+      "labels": {
+        "__farm_source": "promgen",
+        "__metrics_path__": "/metrics",
+        "__scheme__": "http",
+        "__shard": "test-shard",
+        "farm": "test-farm",
+        "job": "node",
+        "project": "test-project",
+        "service": "test-service",
+        "test_label": "test_labelvalue"
+      },
+      "targets": [
+        "example.com:9100"
+      ]
+    }
+  ]

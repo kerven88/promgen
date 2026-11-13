@@ -1,11 +1,20 @@
 import collections
+from functools import lru_cache
 
+from dateutil import parser
+from django.contrib.auth.models import User
+from django.contrib.contenttypes.models import ContentType
+from django.core.validators import MaxValueValidator
+from django.db import transaction
+from django.db.models import prefetch_related_objects
+from drf_spectacular.types import OpenApiTypes
+from drf_spectacular.utils import extend_schema_field
+from guardian.models import UserObjectPermission
 from rest_framework import serializers
 
-from django.db.models import prefetch_related_objects
-
 import promgen.templatetags.promgen as macro
-from promgen import models, shortcuts
+from promgen import errors, models, settings, shortcuts, validators
+from promgen.shortcuts import resolve_domain
 
 
 class WebLinkField(serializers.Field):
@@ -21,8 +30,8 @@ class ShardSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = models.Shard
-        exclude = ('id',)
-        lookup_field = 'name'
+        exclude = ("id", "authorization")
+        lookup_field = "name"
 
 
 class ServiceSerializer(serializers.ModelSerializer):
@@ -32,8 +41,8 @@ class ServiceSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = models.Service
-        exclude = ('id',)
-        lookup_field = 'name'
+        exclude = ("id",)
+        lookup_field = "name"
 
 
 class ProjectSerializer(serializers.ModelSerializer):
@@ -44,16 +53,17 @@ class ProjectSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = models.Project
-        lookup_field = 'name'
-        exclude = ("id", "farm")
+        lookup_field = "name"
+        exclude = ("id",)
 
 
 class SenderSerializer(serializers.ModelSerializer):
-    owner = serializers.ReadOnlyField(source='owner.username')
-    label = serializers.ReadOnlyField(source='show_value')
+    owner = serializers.ReadOnlyField(source="owner.username")
+    label = serializers.ReadOnlyField(source="show_value")
 
     class Meta:
         model = models.Sender
+        fields = "__all__"
 
 
 class AlertRuleList(serializers.ListSerializer):
@@ -88,16 +98,694 @@ class AlertRuleSerializer(serializers.ModelSerializer):
             "content_type",
             "overrides__content_object",
             "overrides__content_type",
-            "ruleannotation_set",
-            "rulelabel_set",
         )
         return AlertRuleList(queryset, *args, **kwargs)
 
     def to_representation(self, obj):
+        annotations = obj.annotations
+        annotations["rule"] = resolve_domain("rule-detail", pk=obj.pk if obj.pk else 0)
+
         return {
             "alert": obj.name,
             "expr": macro.rulemacro(obj),
             "for": obj.duration,
             "labels": obj.labels,
-            "annotations": obj.annotations,
+            "annotations": annotations,
         }
+
+
+class FarmSerializer(serializers.ModelSerializer):
+    url = WebLinkField()
+
+    class Meta:
+        model = models.Farm
+        fields = "__all__"
+
+
+class HostSerializer(serializers.ModelSerializer):
+    url = WebLinkField()
+
+    class Meta:
+        model = models.Host
+        exclude = ("id", "farm")
+
+
+class MatcherSerializer(serializers.Serializer):
+    name = serializers.CharField()
+    value = serializers.CharField()
+    isRegex = serializers.BooleanField()
+    isEqual = serializers.BooleanField(default=True)
+
+
+class SilenceSerializer(serializers.Serializer):
+    id = serializers.CharField(required=False)
+    matchers = MatcherSerializer(many=True)
+    startsAt = serializers.CharField(required=False)
+    endsAt = serializers.CharField(required=False)
+    createdBy = serializers.CharField()
+    comment = serializers.CharField(default="Silenced from Promgen")
+    duration = serializers.CharField(required=False)
+
+    def validate(self, data):
+        # Validation for matchers
+        if "matchers" not in data or not data["matchers"]:
+            raise errors.SilenceError.NOMATCHER.error()
+
+        # Every silence should include either a service or project matcher
+        if not any(matcher["name"] in ["service", "project"] for matcher in data["matchers"]):
+            raise errors.SilenceError.NOSERVICEORPROJECTMATCHER.error()
+
+        # Either meaningful service or project matchers are required
+        meaningful_service_matcher = False
+        meaningful_project_matcher = False
+        for matcher in data["matchers"]:
+            if matcher["name"] == "service" and matcher["value"] not in [".*", ".+", ""]:
+                meaningful_service_matcher = True
+            if matcher["name"] == "project" and matcher["value"] not in [".*", ".+", ""]:
+                meaningful_project_matcher = True
+        if not (meaningful_service_matcher or meaningful_project_matcher):
+            raise errors.SilenceError.NO_MEANINGFUL_SERVICE_OR_PROJECT_MATCHER.error()
+
+        if data.get("duration"):
+            # No further validation is required if only duration is set
+            return data
+
+        # Validate our start/end times
+        start = data.get("startsAt")
+        stop = data.get("endsAt")
+
+        if not all([start, stop]):
+            raise errors.SilenceError.STARTENDTIME.error()
+
+        elif parser.parse(start) > parser.parse(stop):
+            raise errors.SilenceError.STARTENDMISMATCH.error()
+
+        return data
+
+
+class AuditSerializer(serializers.ModelSerializer):
+    user = serializers.ReadOnlyField(source="user.username")
+    log = serializers.ReadOnlyField(source="body")
+    content_type = serializers.ReadOnlyField(source="content_type.model")
+    new = serializers.ReadOnlyField(source="data")
+    parent_content_type = serializers.ReadOnlyField(source="parent_content_type.model")
+
+    class Meta:
+        model = models.Audit
+        fields = (
+            "id",
+            "user",
+            "content_type",
+            "object_id",
+            "log",
+            "created",
+            "new",
+            "old",
+            "parent_content_type",
+            "parent_object_id",
+        )
+
+
+class FilterSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = models.Filter
+        fields = ["id", "name", "value"]
+
+
+class NotifierSerializer(serializers.ModelSerializer):
+    owner = serializers.ReadOnlyField(source="owner.username")
+    content_name = serializers.SerializerMethodField()
+    content_type = serializers.ReadOnlyField(source="content_type.model")
+    filters = FilterSerializer(many=True, read_only=True, source="filter_set")
+    value = serializers.SerializerMethodField(
+        method_name="get_notifier_value",
+        help_text="If an alias is set, the value will be hidden as null.",
+    )
+    alias = serializers.CharField(
+        help_text="Use to hide the notifier's value from being displayed."
+    )
+
+    class Meta:
+        model = models.Sender
+        exclude = ("object_id",)
+
+    def get_content_name(self, obj) -> str:
+        if hasattr(obj, "content_object"):
+            if hasattr(obj.content_object, "name"):
+                return obj.content_object.name
+            if hasattr(obj.content_object, "username"):
+                return obj.content_object.username
+        return None
+
+    def get_notifier_value(self, obj) -> str:
+        if obj.alias:
+            return None
+        return obj.value
+
+
+class UpdateNotifierSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = models.Sender
+        fields = ["enabled"]
+
+
+class RuleRetrieveSimpleSerializer(serializers.ModelSerializer):
+    content_name = serializers.CharField(read_only=True, source="content_object.name")
+    content_type = serializers.CharField(read_only=True, source="content_type.model")
+
+    class Meta:
+        model = models.Rule
+        exclude = (
+            "description",
+            "annotations",
+            "labels",
+            "object_id",
+        )
+
+
+class RuleRetrieveDetailSerializer(serializers.ModelSerializer):
+    content_name = serializers.CharField(read_only=True, source="content_object.name")
+    content_type = serializers.CharField(read_only=True, source="content_type.model")
+    annotations = serializers.DictField(
+        required=False,
+        child=serializers.CharField(),
+        help_text="Provide extra details for notifications",
+    )
+    labels = serializers.DictField(
+        required=False,
+        child=serializers.CharField(),
+        help_text="Control routing through AlertManager and Promgen",
+    )
+
+    class Meta:
+        model = models.Rule
+        fields = "__all__"
+        read_only_fields = (
+            "parent",
+            "object_id",
+        )
+
+
+class HostRetrieveSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = models.Host
+        fields = "__all__"
+
+
+class FarmRetrieveSerializer(serializers.ModelSerializer):
+    project = serializers.ReadOnlyField(source="project.name")
+    project_id = serializers.ReadOnlyField(source="project.id")
+    remote = serializers.SerializerMethodField()
+
+    class Meta:
+        model = models.Farm
+        fields = "__all__"
+        read_only_fields = ("id", "project", "source")
+
+    def get_remote(self, obj) -> bool:
+        return obj.driver.remote
+
+
+class HostListSerializer(serializers.Serializer):
+    hosts = serializers.ListField(
+        child=serializers.CharField(), help_text="List of hostnames to add."
+    )
+
+
+class FarmSourceSerializer(serializers.Serializer):
+    name = serializers.CharField()
+    remote = serializers.BooleanField()
+
+
+class RemoteFarmSerializer(serializers.Serializer):
+    name = serializers.CharField()
+
+
+class ExporterRetrieveSerializer(serializers.ModelSerializer):
+    project = serializers.ReadOnlyField(source="project.name")
+    project_id = serializers.ReadOnlyField(source="project.id")
+
+    class Meta:
+        model = models.Exporter
+        fields = "__all__"
+        read_only_fields = ("job", "port", "path", "scheme", "project")
+
+
+class URLSerializer(serializers.ModelSerializer):
+    project = serializers.ReadOnlyField(source="project.name")
+    probe = serializers.ReadOnlyField(source="probe.module")
+
+    class Meta:
+        model = models.URL
+        fields = "__all__"
+
+
+class ProbeSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = models.Probe
+        fields = "__all__"
+
+
+class GroupRetrieveSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = models.Group
+        fields = ("id", "name")
+
+
+class UserWithPermRetrieveSerializer(serializers.Serializer):
+    id = serializers.IntegerField()
+    username = serializers.CharField()
+    email = serializers.EmailField()
+    role = serializers.CharField()
+
+
+class GroupAssignedResourceSerializer(serializers.Serializer):
+    content_type = serializers.CharField()
+    object_id = serializers.IntegerField()
+    name = serializers.CharField()
+    role = serializers.CharField()
+
+
+class AddMemberGroupSerializer(serializers.Serializer):
+    user_ids = serializers.ListField(
+        child=serializers.IntegerField(min_value=1),
+        allow_empty=False,
+    )
+    group_role = serializers.ChoiceField(choices=["ADMIN", "MEMBER"])
+
+
+class UpdateMemberGroupSerializer(serializers.Serializer):
+    group_role = serializers.ChoiceField(choices=["ADMIN", "MEMBER"])
+
+
+class CustomLabelSerializer(serializers.Serializer):
+    class Meta:
+        model = None
+
+    def __init__(self, model, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.model = model
+
+    def get_fields(self):
+        fields = super().get_fields()
+        custom_labels = models.CustomLabel.objects.filter(
+            model=ContentType.objects.get_for_model(self.model)
+        )
+        for field in custom_labels:
+            fields[field.label_name] = serializers.CharField(
+                required=field.is_required,
+                allow_blank=not field.is_required,
+                help_text=field.description,
+                validators=[validators.labelvalue],
+            )
+            if field.is_required:
+                self.required = True
+        return fields
+
+    def to_representation(self, instance):
+        custom_labels = instance.instance.custom_labels
+        return {label.custom_label.label_name: label.value for label in custom_labels.all()}
+
+
+# Dynamic Subclassing for CustomLabelSerializer to avoid shared class-level variable. This is
+# necessary because DRF uses the serializer class name as the ref_name in the OpenAPI schema, and
+# if we use the same class for different models, it will cause conflicts in the schema generation.
+@lru_cache(maxsize=None)
+def get_custom_label_serializer(model):
+    class_name = f"{model.__name__}CustomLabelSerializer"
+    ref_name = f"{model.__name__}CustomLabel"
+
+    meta_cls = type("Meta", (), {"model": model, "ref_name": ref_name})
+
+    def __init__(self, *args, **kwargs):
+        # Bind model at class creation time to avoid shared class-level ref_name mutation.
+        CustomLabelSerializer.__init__(self, model=model, *args, **kwargs)
+
+    return type(
+        class_name,
+        (CustomLabelSerializer,),
+        {"Meta": meta_cls, "__init__": __init__, "__module__": CustomLabelSerializer.__module__},
+    )
+
+
+class ModelWithCustomLabelSerializer(serializers.ModelSerializer):
+    def update(self, instance, validated_data):
+        with transaction.atomic():
+            custom_labels = validated_data.pop("custom_labels", None)
+            instance = super().update(instance, validated_data)
+            instance.update_custom_labels(custom_labels=custom_labels)
+            return instance
+
+    def create(self, validated_data):
+        with transaction.atomic():
+            custom_labels = validated_data.pop("custom_labels", None)
+            instance = super().create(validated_data)
+            instance.update_custom_labels(custom_labels=custom_labels)
+            return instance
+
+    def get_fields(self):
+        fields = super().get_fields()
+        fields["custom_labels"] = get_custom_label_serializer(self.Meta.model)(required=False)
+        return fields
+
+
+class ProjectSimpleSerializer(ModelWithCustomLabelSerializer):
+    class Meta:
+        model = models.Project
+        fields = "__all__"
+
+    def validate_shard(self, shard):
+        # If the shard is being changed, we need to make sure that the new shard is enabled.
+        if shard != self.instance.shard and not shard.enabled:
+            raise serializers.ValidationError("Shard is disabled.")
+        return shard
+
+
+class ShardRetrieveSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = models.Shard
+        exclude = ("authorization",)
+
+
+class ServiceRetrieveSimpleSerializer(ModelWithCustomLabelSerializer):
+    class Meta:
+        model = models.Service
+        fields = "__all__"
+
+
+class ProjectRetrieveDetailSerializer(ModelWithCustomLabelSerializer):
+    owner = serializers.ReadOnlyField(source="owner.username")
+    owner_id = serializers.ReadOnlyField(source="owner.id")
+    service = ServiceRetrieveSimpleSerializer()
+    shard = ShardRetrieveSerializer()
+    farm = FarmRetrieveSerializer()
+
+    class Meta:
+        model = models.Project
+        fields = "__all__"
+
+
+class GroupWithPermRetrieveSerializer(serializers.Serializer):
+    id = serializers.IntegerField()
+    name = serializers.CharField()
+    role = serializers.CharField()
+
+
+class PermissionAssignSerializer(serializers.Serializer):
+    id = serializers.IntegerField()
+    role = serializers.ChoiceField(choices=["ADMIN", "EDITOR", "VIEWER"])
+
+
+class UserObjectPermissionSerializer(serializers.ModelSerializer):
+    object = serializers.CharField(source="content_object.name", required=True)
+    permission = serializers.CharField(source="permission.codename", required=True)
+    user = serializers.CharField(source="user.username", required=True)
+
+    class Meta:
+        model = UserObjectPermission
+        fields = ("id", "object", "permission", "user")
+
+
+class GroupObjectPermissionSerializer(serializers.ModelSerializer):
+    object = serializers.CharField(source="content_object.name", required=True)
+    permission = serializers.CharField(source="permission.codename", required=True)
+    group = serializers.CharField(source="group.name", required=True)
+
+    class Meta:
+        model = UserObjectPermission
+        fields = ("id", "group", "object", "permission")
+
+
+class RegisterExporterToProjectSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = models.Exporter
+        fields = ("job", "port", "path", "scheme", "enabled")
+
+
+@extend_schema_field(OpenApiTypes.STR)
+class ProbeField(serializers.Field):
+    def to_internal_value(self, data):
+        try:
+            probe = models.Probe.objects.get(module=data)
+        except models.Probe.DoesNotExist:
+            raise serializers.ValidationError("Probe does not exist.")
+        return probe
+
+    def to_representation(self, value):
+        return value.module
+
+
+class RegisterURLToProjectSerializer(serializers.ModelSerializer):
+    probe = ProbeField()
+
+    class Meta:
+        model = models.URL
+        fields = ("url", "probe")
+
+
+class RegisterFarmToProjectSerializer(serializers.ModelSerializer):
+    source = serializers.CharField()
+    hosts = serializers.ListField(
+        required=False,
+        child=serializers.CharField(),
+        help_text="List of hostnames. Only used when registering a local farm.",
+    )
+
+    class Meta:
+        model = models.Farm
+        fields = ("name", "hosts", "source")
+
+
+class RegisterNotifierSerializer(serializers.Serializer):
+    sender = serializers.ChoiceField(choices=[name for name, _ in models.Sender.driver_set()])
+    value = serializers.CharField()
+    alias = serializers.CharField(required=False)
+    enabled = serializers.BooleanField(required=False, default=True)
+    filters = FilterSerializer(many=True, required=False)
+
+
+class ServiceRetrieveDetailSerializer(ModelWithCustomLabelSerializer):
+    owner = serializers.ReadOnlyField(source="owner.username")
+    owner_id = serializers.ReadOnlyField(source="owner.id")
+
+    class Meta:
+        model = models.Service
+        fields = "__all__"
+
+
+class RegisterServiceSerializer(ModelWithCustomLabelSerializer):
+    class Meta:
+        model = models.Service
+        fields = "__all__"
+        read_only_fields = ("owner",)
+
+
+class RegisterProjectToServiceSerializer(ModelWithCustomLabelSerializer):
+    class Meta:
+        model = models.Project
+        fields = "__all__"
+        read_only_fields = ("service", "owner")
+
+    def validate_shard(self, shard):
+        if not shard.enabled:
+            raise serializers.ValidationError("Shard is disabled.")
+        return shard
+
+
+class UserRetrieveSimpleSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = User
+        fields = ("id", "username", "email", "first_name", "last_name")
+
+
+class UserRetrieveDetailSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = User
+        fields = (
+            "id",
+            "username",
+            "email",
+            "first_name",
+            "last_name",
+            "is_staff",
+            "is_superuser",
+            "date_joined",
+        )
+
+
+class ShardRetrieveDetailSerializer(serializers.ModelSerializer):
+    samples_count = serializers.IntegerField(read_only=True, help_text="Number of samples.")
+    targets_count = serializers.IntegerField(read_only=True, help_text="Number of targets.")
+
+    class Meta:
+        model = models.Shard
+        exclude = ("authorization",)
+
+
+class SiteRetrieveSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = models.Site
+        fields = "__all__"
+
+
+class RuleOverridesField(RuleRetrieveDetailSerializer):
+    """
+    Same as RuleRetrieveDetailSerializer, but every field is optional because the original fields
+    will be used if user does not provide the overridden values.
+    """
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        for field in self.fields.values():
+            field.required = False
+
+
+class RuleOverrideSerializer(serializers.Serializer):
+    original_rule_id = serializers.IntegerField()
+    overrides = RuleOverridesField(
+        required=False,
+        help_text="Fields to override. If not provided, the original rule's fields will be used.",
+    )
+
+    def validate_original_rule_id(self, value):
+        if not models.Rule.objects.filter(pk=value).exists():
+            raise serializers.ValidationError("Original rule does not exist.")
+        return value
+
+
+class TokenRetrieveSerializer(serializers.ModelSerializer):
+    has_expired = serializers.BooleanField(read_only=True, source="is_expired")
+
+    class Meta:
+        model = models.AuthToken
+        exclude = ("token_key", "user")
+
+
+class TokenCreateRequestSerializer(serializers.Serializer):
+    name = serializers.CharField(max_length=64, help_text="Name of the token.", required=False)
+    days_to_live = serializers.IntegerField(
+        min_value=1,
+        help_text="Time to live for this token in days.",
+        required=False,
+        allow_null=True,
+    )
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        if settings.API_TOKEN_TTL_DAYS:
+            max_days_to_live = settings.API_TOKEN_TTL_DAYS
+            self.fields["days_to_live"].validators.append(MaxValueValidator(max_days_to_live))
+            self.fields["days_to_live"].required = True
+            self.fields["days_to_live"].allow_null = False
+        else:
+            self.fields["days_to_live"].help_text += " Leave null for no expiration."
+
+
+class TokenCreateResponseSerializer(serializers.Serializer):
+    name = serializers.CharField(read_only=True, help_text="Name of the token.")
+    token = serializers.CharField(
+        read_only=True,
+        help_text="The actual token value. "
+        "This is only returned on creation and cannot be retrieved again.",
+    )
+
+
+class NotifierTestRequestSerializer(serializers.Serializer):
+    sender = serializers.ChoiceField(
+        choices=[name for name, _ in models.Sender.driver_set()],
+        help_text="The sender to test. Only required when the notifier ID is 0.",
+    )
+    value = serializers.CharField(
+        help_text="The value to test with. Only required when the notifier ID is 0."
+    )
+
+
+class RuleTestRequestSerializer(serializers.Serializer):
+    content_type = serializers.ChoiceField(
+        choices=["service", "project", "site"],
+        help_text="The content type of the object. Only required when rule ID is 0.",
+    )
+    object_id = serializers.IntegerField(
+        help_text="The ID of the object. Only required when rule ID is 0."
+    )
+    clause = serializers.CharField(
+        help_text="The clause to test against. Only required when rule ID is 0."
+    )
+
+    def validate(self, attrs):
+        content_type_obj = ContentType.objects.get(
+            model=attrs.get("content_type"), app_label="promgen"
+        )
+        try:
+            content_type_obj.get_object_for_this_type(pk=attrs.get("object_id"))
+        except content_type_obj.model_class().DoesNotExist:
+            raise serializers.ValidationError({"object_id": "Object does not exist."})
+
+        return attrs
+
+
+class RuleTestResultSerializer(serializers.Serializer):
+    clause = serializers.CharField(read_only=True)
+    duration = serializers.DurationField(read_only=True)
+    firing = serializers.BooleanField(read_only=True)
+    errors = serializers.DictField(child=serializers.CharField(), read_only=True)
+
+
+class ExporterTestRequestSerializer(serializers.Serializer):
+    scheme = serializers.ChoiceField(
+        choices=[("http", "http"), ("https", "https")],
+        default="http",
+        help_text="URL scheme to use when testing a new exporter (exporter ID is 0).",
+    )
+    port = serializers.IntegerField(
+        help_text="Port to test. Required when testing a new exporter (exporter ID is 0).",
+    )
+    path = serializers.CharField(
+        default="/metrics",
+        help_text="URL path to test for a new exporter (exporter ID is 0).",
+    )
+    hosts = serializers.ListField(
+        default=[],
+        child=serializers.CharField(),
+        help_text="(Optional) List of hosts to test the exporter against. "
+        "If not provided when testing an existing exporter, the test will be run against all hosts "
+        "of the exporter's project.",
+        max_length=settings.V2_API_MAX_HOSTS_PER_EXPORTER_TEST,
+    )
+
+
+class ExporterTestResultDetailSerializer(serializers.Serializer):
+    url = serializers.URLField(read_only=True)
+    status_code = serializers.IntegerField(read_only=True)
+    metric_count = serializers.IntegerField(read_only=True)
+    sample_count = serializers.IntegerField(read_only=True)
+    error = serializers.CharField(read_only=True)
+
+
+class ExporterTestResponseSerializer(serializers.Serializer):
+    success = serializers.BooleanField(
+        read_only=True,
+        default=True,
+        help_text="Indicates whether the scrape was successful for all URLs.",
+    )
+    message = serializers.CharField(read_only=True, default="Scrape completed.")
+    details = ExporterTestResultDetailSerializer(read_only=True, many=True)
+
+    def to_representation(self, results):
+        re = super().to_representation(results)
+        payload = []
+        for key, value in results.items():
+            payload.append(
+                {
+                    "url": key,
+                    "status_code": value.get("status_code"),
+                    "metric_count": value.get("metric_count"),
+                    "sample_count": value.get("sample_count"),
+                    "error": value.get("error"),
+                }
+            )
+            if value.get("status_code") not in range(200, 300):
+                re["success"] = False
+                re["message"] = "Scrape failed for some URLs."
+        re["details"] = ExporterTestResultDetailSerializer(payload, many=True).data
+        return re

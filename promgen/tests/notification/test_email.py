@@ -3,6 +3,7 @@
 
 from unittest import mock
 
+from django.contrib.auth.models import Permission
 from django.test import override_settings
 
 from promgen import models, rest, tests
@@ -13,10 +14,19 @@ class EmailTest(tests.PromgenTest):
     def setUp(self):
         one = models.Project.objects.get(pk=1)
         two = models.Project.objects.get(pk=2)
+        self.user = self.force_login(username="demo")
 
-        NotificationEmail.create(obj=one, value="example@example.com")
-        NotificationEmail.create(obj=one, value="foo@example.com")
-        NotificationEmail.create(obj=two, value="bar@example.com")
+        NotificationEmail.create(obj=one, value="example@example.com", owner=self.user)
+        NotificationEmail.create(obj=one, value="foo@example.com", owner=self.user)
+        NotificationEmail.create(obj=two, value="bar@example.com", owner=self.user)
+
+        # We disable all other senders to ensure that only our email sender is triggered
+        # during this test.
+        models.Sender.objects.exclude(sender=NotificationEmail.__module__).update(enabled=False)
+
+        self.user = self.force_login(username="demo")
+        permission = Permission.objects.get(codename="process_alert")
+        self.user.user_permissions.add(permission)
 
     @override_settings(PROMGEN=tests.SETTINGS)
     @override_settings(CELERY_TASK_ALWAYS_EAGER=True)
@@ -31,12 +41,8 @@ class EmailTest(tests.PromgenTest):
 
         mock_email.assert_has_calls(
             [
-                mock.call(
-                    _SUBJECT, _MESSAGE, "promgen@example.com", ["example@example.com"]
-                ),
-                mock.call(
-                    _SUBJECT, _MESSAGE, "promgen@example.com", ["foo@example.com"]
-                ),
+                mock.call(_SUBJECT, _MESSAGE, "promgen@example.com", ["example@example.com"]),
+                mock.call(_SUBJECT, _MESSAGE, "promgen@example.com", ["foo@example.com"]),
             ],
             any_order=True,
         )

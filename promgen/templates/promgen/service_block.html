@@ -1,6 +1,15 @@
 {% load i18n %}
 {% load promgen %}
+{% current_role service as role %}
 <div class="well">
+  {% if service.description %}
+  <div class="panel panel-default">
+    <div v-pre class="panel-body">
+      {{service.description|linebreaksbr|urlize}}
+    </div>
+  </div>
+  {% endif %}
+
   <div data-service="{{service.name}}" class="panel panel-danger" v-cloak v-if="activeServiceAlerts.has('{{service.name}}')">
     <div class="panel-heading">
       <a @click="toggleComponent('alerts-service-{{service.name|slugify}}')" class="btn btn-danger btn-sm" role="button">Alerts</a>
@@ -12,28 +21,20 @@
     </table>
   </div>
 
-  <div id="silence-service-{{ service.name|slugify }}" class="panel panel-warning" v-cloak v-if="activeServiceSilences.has('{{service.name}}')">
-    <div class="panel-heading">
-      <a @click="toggleComponent('silences-service-{{service.name|slugify}}')" class="btn btn-warning btn-sm" role="button">Silences</a>
-    </div>
-    <table v-if="components['silences-service-{{service.name|slugify}}']" class="table table-bordered table-condensed">
-      <tr v-for="silence in activeServiceSilences.get('{{service.name}}')">
-        {% include 'promgen/silence_row.html' %}
-      </tr>
-    </table>
-  </div>
-
-  {% if service.description %}
-  <div class="panel panel-default">
-    <div class="panel-body">
-      {{service.description|linebreaksbr|urlize}}
-    </div>
-  </div>
-  {% endif %}
+  <a
+    v-cloak
+    v-if="getActiveSilencesForService('{{service.name}}').length > 0"
+    @click="openSilenceListModal(null, silences=getActiveSilencesForService('{{service.name}}'), 'service')"
+    class="btn btn-warning btn-sm mb-4"
+    role="button"
+  >
+    Active silences
+  </a>
 
   <div class="panel panel-default">
     <div class="panel-body">
-      <div class="btn-group btn-group-sm" role="group" aria-label="...">
+      {% if role == "ADMIN" or role == "EDIT" %}
+      <div class="btn-group btn-group-sm mr-2" role="group" aria-label="...">
         <button type="button" class="btn btn-primary dropdown-toggle" data-toggle="dropdown" aria-haspopup="true" aria-expanded="false">
           {% trans "Register" %} <span class="caret"></span>
         </button>
@@ -43,64 +44,17 @@
           <li role="presentation"><a href="{% url 'service-notifier' service.id %}">{% trans "Register Notifier" %}</a></li>
         </ul>
       </div>
+      {% endif %}
 
-      <form action="{% url 'service-notifier' service.id %}" style="display:inline" method="post">{% csrf_token %}
-        <input type="hidden" name="sender" value="promgen.notification.user">
-        <input type="hidden" name="value" value="{{request.user.username}}" />
-        <button class="btn btn-primary btn-sm">{% trans "Subscribe to Notifications" %}</button>
-      </form>
+      {% include "promgen/service_action_button_group.html" %}
 
-      <div class="btn-group btn-group-sm" role="group" aria-label="...">
-        <button type="button" class="btn btn-info dropdown-toggle" data-toggle="dropdown" aria-haspopup="true" aria-expanded="false">
-          {% trans "Change History" %} <span class="caret"></span>
-        </button>
-        <ul class="dropdown-menu">
-          <li role="presentation"><a href="{% urlqs 'audit-list' service=service.id %}">{% trans "Edit History" %}</a></li>
-          <li role="presentation"><a href="{% urlqs 'alert-list' service=service.name %}">{% trans "Alert History" %}</a></li>
-        </ul>
-      </div>
-
-      <a href="{% url 'service-update' service.id %}" class="btn btn-warning btn-sm">{% trans "Edit Service" %}</a>
-      <a @click="setSilenceDataset" data-service="{{service.name}}" class="btn btn-warning btn-sm">{% trans "Silence" %}</a>
-
-      <div class="btn-group btn-group-sm" role="group" aria-label="...">
-        <button type="button" class="btn btn-default dropdown-toggle" data-toggle="dropdown" aria-haspopup="true" aria-expanded="false">
-          Export <span class="caret"></span>
-        </button>
-        <ul class="dropdown-menu">
-          <li role="presentation"><a href="{% url 'api:service-rules' name=service.name %}">{% trans "Export Rules" %}</a></li>
-          <li role="presentation"><a href="{% url 'api:service-targets' name=service.name %}">{% trans "Export Service" %}</a></li>
-        </ul>
-      </div>
-
-      <form method="post" action="{% url 'service-delete' service.id %}" onsubmit="return confirm('{% trans "Delete this service?" %}')" style="display: inline">
-        {% csrf_token %}
-        <button class="btn btn-danger btn-sm pull-right">{% trans "Delete Service" %}</button>
-      </form>
     </div>
   </div>
 
-  {% if service.rule_set.count or request.site.rule_set.count %}
-  <div class="panel panel-default">
-    <table class="table table-bordered table-condensed">
-      {% include "promgen/rule_header.html" %}
-      {% include "promgen/rule_block.html" with rule_list=service.rule_set.all toggle=1 delete=1 %}
-      {% include "promgen/rule_block.html" with rule_list=request.site.rule_set.all collapse="service-site-rules-" overwrite_type='service' overwrite_id=service.id %}
-    </table>
-    <div class="panel-footer">
-      <a class="btn btn-default btn-xs" role="button" data-toggle="collapse" href=".service-site-rules-{{service.id}}" aria-expanded="false" aria-controls="collapseExample">
-        {% trans 'Show Site Rules' %}
-      </a>
-    </div>
-  </div>
-  {% endif %}
+  {% include "promgen/service_block_panel_rules.inc.html" %} 
 
-  {% if service.notifiers.count %}
-  <div class="panel panel-default">
-    {% include "promgen/notifier_block.html" with object=service show_edit=1 %}
-  </div>
-  {% endif %}
+  {% include "promgen/service_block_panel_notifiers.inc.html" %}
 
-  {% include "promgen/service_block_projects.html" with project_list=project_list|default:service.project_set.all service=service only %}
+  {% include "promgen/service_block_projects.html" with project_list=project_list|default:service.project_set.all service=service role=role only %}
 
 </div><!-- end well-->

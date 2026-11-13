@@ -7,16 +7,99 @@ Promgen / Service / {{ service.name }}
 {% endblock %}
 
 {% block content %}
+{% current_role service as role %}
 
-<div class="page-header">
-  <h1>Service: {{ service.name }}</h1>
-  {% if service.owner %}
-  <p>{% trans 'Contact' %}: {{service.owner.username}}</p>
-  {% endif %}
+<div class="page-header promgen-flex-space-between-center">
+  <div>
+    <h1>Service: {{ service.name }}</h1>
+      {% for label in service.custom_labels.all %}
+        <span class="label label-primary">{{label.custom_label.label_name}}:{{label.value}}</span>
+      {% endfor %}
+  </div>
+
+  {% include "promgen/service_action_button_group.html" %}
 </div>
 
 {% breadcrumb service %}
 
-{% include "promgen/service_block.html" %}
+{% if service.description %}
+<div class="panel panel-default">
+  <div v-pre class="panel-body">
+    {{service.description|linebreaksbr|urlize}}
+  </div>
+</div>
+{% endif %}
+
+<div class="panel panel-danger" v-cloak v-if="activeServiceAlerts.has('{{service.name}}')">
+  <div class="panel-heading">
+    <a
+      @click="toggleCollapse('alerts-service-{{service.name|slugify}}')"
+      class="btn btn-danger btn-sm"
+      role="button"
+    >
+      Active alerts
+    </a>
+  </div>
+  <table
+    id="alerts-service-{{service.name|slugify}}"
+    class="table table-bordered table-condensed collapse"
+  >
+    <tr v-for="alert in activeServiceAlerts.get('{{service.name}}')">
+      {% include 'promgen/alert_row.html' %}
+    </tr>
+  </table>
+</div>
+
+<a
+  v-cloak
+  v-if="getActiveSilencesForService('{{service.name}}').length > 0"
+  @click="openSilenceListModal(null, silences=getActiveSilencesForService('{{service.name}}'), 'service')"
+  class="btn btn-warning btn-sm mb-4"
+  role="button"
+>
+  Active silences
+</a>
+
+<ul class="nav nav-tabs mb-5" role="tablist">
+  <li role="presentation" class="active"><a href="#projects" data-toggle="tab">Projects</a></li>
+  <li role="presentation"><a href="#rules" data-toggle="tab">Rules</a></li>
+  <li role="presentation"><a href="#notifiers" data-toggle="tab">Notifiers</a></li>
+  <li role="presentation"><a href="#members" data-toggle="tab">Members</a></li>
+</ul>
+
+
+<div class="tab-content">
+  <div role="tabpanel" class="tab-pane active well" id="projects">
+    {% include "promgen/service_detail_projects.html" with project_list=project_list|default:service.project_set.all service=service role=role only %}
+  </div>
+
+  <div role="tabpanel" class="tab-pane well" id="rules">
+    {% if role == "ADMIN" or role == "EDIT" %}
+    <div class="text-right mb-4">
+      <a href="{% url 'rule-new' 'service' service.id %}" class="btn btn-primary btn-sm">{% translate "Register Rule" %}</a>
+    </div>
+    {% endif %}
+
+    {% include "promgen/service_block_panel_rules.inc.html" %}
+
+  </div>
+
+  <div role="tabpanel" class="tab-pane well" id="notifiers">
+    {% if role == "ADMIN" or role == "EDIT" %}
+    <div class="text-right mb-4">
+      <a href="{% url 'service-notifier' service.id %}" class="btn btn-primary btn-sm">{% translate "Register Notifier" %}</a>
+    </div>
+    {% endif %}
+
+    {% include "promgen/service_block_panel_notifiers.inc.html" %}
+
+  </div>
+
+  <div role="tabpanel" class="tab-pane" id="members">
+    {% include "promgen/permission_block.html" with object=service %}
+  </div>
+
+</div>
+
 
 {% endblock %}

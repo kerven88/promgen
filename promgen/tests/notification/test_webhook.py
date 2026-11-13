@@ -3,9 +3,9 @@
 
 from unittest import mock
 
-from requests.exceptions import RequestException
-
+from django.contrib.auth.models import Permission
 from django.test import override_settings
+from requests.exceptions import RequestException
 
 from promgen import models, rest, tests
 from promgen.notification.webhook import NotificationWebhook
@@ -16,12 +16,20 @@ class WebhookTest(tests.PromgenTest):
         one = models.Project.objects.get(pk=1)
         two = models.Service.objects.get(pk=1)
 
+        # We disable all other senders to ensure that only our Webhook sender is triggered
+        # during this test.
+        models.Sender.objects.exclude(sender=NotificationWebhook.__module__).update(enabled=False)
+
         self.senderA = NotificationWebhook.create(
-            obj=one, value="http://webhook.example.com/project"
+            obj=one, value="http://webhook.example.com/project", owner_id=1
         )
         self.senderB = NotificationWebhook.create(
-            obj=two, value="http://webhook.example.com/service"
+            obj=two, value="http://webhook.example.com/service", owner_id=1
         )
+
+        self.user = self.force_login(username="demo")
+        permission = Permission.objects.get(codename="process_alert")
+        self.user.user_permissions.add(permission)
 
     @override_settings(PROMGEN=tests.SETTINGS)
     @override_settings(CELERY_TASK_ALWAYS_EAGER=True)
@@ -60,7 +68,7 @@ class WebhookTest(tests.PromgenTest):
         self.senderB.filter_set.create(name="severity", value="critical")
         self.senderB.filter_set.create(name="severity", value="major")
 
-        self.assertCount(models.Filter, 3, "Should be three filters")
+        self.assertCount(models.Filter, 4, "Should be four filters (One already exists)")
 
         response = self.fireAlert()
         self.assertRoute(response, rest.AlertReceiver, 202)

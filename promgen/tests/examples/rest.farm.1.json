@@ -1,0 +1,13 @@
+{
+  "id": 1,
+  "url": "http://promgen.example.com/farm/1",
+  "name": "test-farm",
+  "source": "promgen",
+  "hosts": [
+    {
+      "name": "example.com",
+      "url": "http://promgen.example.com/host/example.com"
+    }
+  ],
+  "project": 1
+}

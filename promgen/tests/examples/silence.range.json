@@ -1,8 +1,9 @@
 {
-  "createdBy": "demo@example.com",
+  "createdBy": "admin",
   "matchers": [{
     "value": "example.com:[0-9]*",
     "isRegex": true,
+    "isEqual": true,
     "name": "instance"
   }],
   "comment": "Silenced from Promgen",

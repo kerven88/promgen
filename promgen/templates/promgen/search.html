@@ -1,15 +1,31 @@
 {% extends "base.html" %}
 {% load i18n %}
+{% load promgen %}
 {% block content %}
 
 <div class="page-header">
-  <h1>Hosts</h1>
+  <h1>Search</h1>
 </div>
 
-<ol class="breadcrumb">
-  <li><a href="{% url 'service-list' %}">Home</a></li>
-  <li class="active">Search</li>
-</ol>
+{% breadcrumb label="Search" %}
+
+{% include "promgen/pagination_short.html" %}
+
+{% if group_list %}
+<div class="panel panel-default">
+  <div class="panel-heading">Groups</div>
+  <table class="table table-bordered table-condensed">
+    <tr>
+      <th>Name</th>
+    </tr>
+    {% for group in group_list %}
+    <tr>
+      <td><a href="{% url 'group-detail' group.pk %}" v-pre>{{ group.name }}</a></td>
+    </tr>
+    {% endfor %}
+  </table>
+</div>
+{% endif %}
 
 {% if service_list %}
 <div class="panel panel-default">
@@ -22,18 +38,18 @@
     </tr>
     {% for service in service_list %}
     <tr>
-      <td><a href="{% url 'service-detail' service.id %}">{{ service.name }}</a></td>
+      <td><a href="{% url 'service-detail' service.id %}" v-pre>{{ service.name }}</a></td>
       <td>
         <ul class="list-unstyled">
         {% for project in service.project_set.all %}
-          <li><a href="{% url 'project-detail' project.id %}">{{ project.name }}</a></li>
+          <li><a href="{% url 'project-detail' project.id %}" v-pre>{{ project.name }}</a></li>
         {% endfor %}
         </ul>
       </td>
       <td>
         <ul class="list-unstyled">
         {% for rule in service.rule_set.all %}
-          <li><a href="{% url 'rule-detail' rule.id %}">{{ rule.name }}</a></li>
+          <li><a href="{% url 'rule-detail' rule.id %}" v-pre>{{ rule.name }}</a></li>
         {% endfor %}
         </ul>
       </td>
@@ -54,6 +70,7 @@
       <th class="col-md-1">Actions</th>
     </tr>
     {% for project in project_list %}
+    {% current_role project as role %}
     {% include 'promgen/project_row.html' %}
     {% endfor %}
   </table>
@@ -70,26 +87,29 @@
       <th>Hosts</th>
     </tr>
     {% for farm in farm_list %}
+    {% current_role farm as role %}
     <tr>
-      <td><a href="{% url 'farm-detail' farm.id %}">{{ farm.name }}</a></td>
+      <td><a href="{% url 'farm-detail' farm.id %}" v-pre>{{ farm.name }}</a></td>
       <td>
         <ul class="list-unstyled">
-{% for project in farm.project_set.all %}
-          <li><a href="{% url 'project-detail' project.id %}">{{ project.name }}</a></li>
-{% endfor %}
+          <li><a href="{% url 'project-detail' farm.project.id %}" v-pre>{{ farm.project.name }}</a></li>
         </ul>
       </td>
       <td>
         <ul class="list-unstyled">
 {% for host in farm.host_set.all %}
           <li>
-            <a href="{% url 'host-detail' host.name %}">{{ host.name }}</a>
+            <a href="{% url 'host-detail' host.name %}" v-pre>{{ host.name }}</a>
+            {% if role == "ADMIN" or role == "EDIT" %}
             <a
             @click="setSilenceDataset"
             class="btn btn-warning btn-xs"
             data-instance="{{host.name}}:[0-9]*"
+            data-project="{{farm.project.name}}"
+            data-service="{{host.farm.project.service.name}}"
             style="display: inline-block;"
           >{% trans "Silence" %}</a></li>
+            {% endif %}
 {% endfor %}
         </ul>
       </td>
@@ -103,15 +123,38 @@
 <div class="panel panel-default">
   <div class="panel-heading">Hosts</div>
   <table class="table">
+    <tr>
+      <th>Name</th>
+      <th>Farm</th>
+      <th>Project</th>
+      <th>Actions</th>
+    </tr>
     {% for host in host_list %}
       <tr>
-        <td><a href="{% url 'host-detail' host.name %}">{{ host.name }}</a></td>
-        <td><a
-          @click="setSilenceDataset"
-          class="btn btn-warning btn-xs"
-          data-instance="{{host.name}}:[0-9]*"
-          style="display: inline-block;"
-        >{% trans "Silence" %}</a></td>
+        <td><a href="{% url 'host-detail' host.name %}" v-pre>{{ host.name }}</a></td>
+        <td><a href="{% url 'farm-detail' host.farm.id %}" v-pre>{{ host.farm.name }}</a></td>
+        {% if host.farm.project %}
+        <td>
+          <a href="{{ host.farm.project.get_absolute_url }}" v-pre>
+            {{ host.farm.project }}
+          </a>
+        </td>
+        <td>
+          <a
+            @click="setSilenceDataset"
+            class="btn btn-warning btn-xs"
+            data-instance="{{host.name}}:[0-9]*"
+            data-project="{{host.farm.project.name}}"
+            data-service="{{host.farm.project.service.name}}"
+            style="display: inline-block;"
+          >
+          {% trans "Silence" %}
+          </a>
+        </td>
+        {% else %}
+        <td></td>
+        <td></td>
+        {% endif %}
       </tr>
     {% endfor %}
   </table>
@@ -127,5 +170,6 @@
   </table>
 </div>
 {% endif %}
+{% include "promgen/pagination_short.html" %}
 
 {% endblock %}

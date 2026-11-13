@@ -1,9 +1,10 @@
 {% extends "base.html" %}
 {% load promgen %}
+{% load i18n %}
 {% block content %}
 
 {% if project %}
-<div class="page-header">
+<div class="page-header" v-pre>
   <h1>Project: {{ project.name }}</h1>
 </div>
 
@@ -12,6 +13,10 @@
 <div class="alert alert-danger" role="alert">
   <span class="glyphicon glyphicon-alert" aria-hidden="true"></span>
   Warning. Renaming or Moving a project will reset all labels in Prometheus
+</div>
+<div class="alert alert-danger" role="alert">
+  <span class="glyphicon glyphicon-alert" aria-hidden="true"></span>
+  {% trans "Warning. The owner can only be changed by the current owner. The new owner will have the ADMIN role." %}
 </div>
 {% else %}
 <div class="page-header">
@@ -38,6 +43,7 @@
           {{form.description}}
         </td>
       </tr>
+      {% if form.owner %}
       <tr>
         <th>{{form.owner.label}}</th>
         <td>
@@ -45,6 +51,8 @@
           {{form.owner}}
         </td>
       </tr>
+      {% endif %}
+      {% if project.pk %}
       <tr>
         <th>{{form.service.label}}</th>
         <td>
@@ -52,6 +60,18 @@
           {{form.service}}
         </td>
       </tr>
+      {% endif %}
+      {% for field in form %}
+      {% if field.name|slice:":12" == "custom_label" %}
+      <tr>
+        <th>{{field.label}}</th>
+        <td>
+          {% include 'promgen/error_block.html' with warning=field.errors only %}
+          {{field}}
+        </td>
+      </tr>
+      {% endif %}
+      {% endfor %}
     </table>
   </div>
   {% include 'promgen/error_block.html' with warning=form.shard.errors only %}
@@ -80,22 +100,17 @@
       </tr>
       {% for shard in shard_list|dictsort:'name' %}
       <tr {% if shard.enabled is False %}class="text-muted" title="Datasource disabled for new registrations" {% endif %}>
-        <th>{{shard.name}}</th>
-        <th>{{shard.url|urlize}}</th>
+        <th v-pre>{{shard.name}}</th>
+        <th v-pre>{{shard.url|urlize}}</th>
         <td>
-          <input type="radio" name="shard" value="{{shard.id}}" {% if shard.id == form.shard.value %}checked{% elif shard.enabled is False %}disabled{% endif %}>
-        </td>
-        {% if shard.proxy %}
-        <td>
-          <promql-query class="label" href='{{shard.url}}/api/v1/query' query='sum(scrape_samples_scraped)' max="{{shard.samples}}">Samples: </promql-query>
+          <input type="radio" name="shard" value="{{shard.id}}" {% if shard.id == project.shard_id %}checked{% elif shard.enabled is False %}disabled{% endif %}>
         </td>
         <td>
-          <promql-query class="label" href='{{shard.url}}/api/v1/query' query='count(up)' max="{{shard.targets}}">Exporters: </promql-query>
+          <data-source-usage class="label" shard="{{shard.name}}" metric="samples" max="{{shard.samples}}"></data-source-usage>
         </td>
-        {% else %}
-        <td>&nbsp;</td>
-        <td>&nbsp;</td>
-        {% endif %}
+        <td>
+          <data-source-usage class="label" shard="{{shard.name}}" metric="exporters" max="{{shard.targets}}"></data-source-usage>
+        </td>
       </tr>
       {% endfor %}
     </table>

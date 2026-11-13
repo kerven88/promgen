@@ -1,0 +1,33 @@
+{% load i18n %}
+<tr>
+  <td class="col-xs-1">[[ time(silence.startsAt) ]]</td>
+  <td class="col-xs-1">[[ time(silence.endsAt) ]]</td>
+  <td class="col-xs-3 text-wrap">
+    <ul class="list-inline">
+      <li
+        v-for="matcher in silence.matchers"
+        :title="`${matcher.name}${getOperator(matcher)}${matcher.value}`"
+        class="promgen-silence-matcher-truncate"
+        style="color: white"
+      >
+        <a
+          @click="$emit('matcherClick', matcher.name, matcher.value, getOperator(matcher))"
+          class="label"
+          :class="`label-${labelColor}`"
+        >
+          [[ matcher.name ]][[ getOperator(matcher) ]][[ matcher.value ]]
+        </a>
+      </li>
+    </ul>
+  </td>
+  <td class="col-xs-3" v-html="urlize(silence.comment)"></td>
+  <td class="col-xs-2">[[ silence.createdBy ]]</td>
+  <td class="col-xs-2">
+    <a @click="$root.editSilence(silence)" class="btn btn-warning btn-xs">
+      {% translate "Edit" %}
+    </a>
+    <a @click="$root.expireSilence(silence.id)" class="btn btn-warning btn-xs">
+      {% translate "Expire" %}
+    </a>
+  </td>
+</tr>

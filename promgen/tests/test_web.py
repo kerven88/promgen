@@ -1,11 +1,16 @@
 # Copyright (c) 2022 LINE Corporation
 # These sources are released under the terms of the MIT license: see LICENSE
+from unittest.mock import patch
+
+from django.contrib.messages import ERROR, get_messages
 from django.urls import reverse
+from guardian.shortcuts import assign_perm, remove_perm
 
-from promgen import tests, views
+from promgen import models, views
+from promgen.tests import PromgenTest
 
 
-class WebTests(tests.PromgenTest):
+class WebTests(PromgenTest):
     fixtures = ["testcases.yaml", "extras.yaml"]
 
     route_map = [
@@ -13,16 +18,69 @@ class WebTests(tests.PromgenTest):
         ("datasource-list", views.DatasourceList, {}),
         ("datasource-detail", views.DatasourceDetail, {"pk": 1}),
         ("service-list", views.ServiceList, {}),
-        ("service-detail", views.ServiceDetail, {"pk": 1}),
-        ("project-detail", views.ProjectDetail, {"pk": 1}),
-        ("farm-link", views.FarmLink, {"pk": 1, "source": "promgen"}),
-        ("project-exporter", views.ExporterRegister, {"pk": 1}),
-        ("project-notifier", views.ProjectNotifierRegister, {"pk": 1}),
+        (
+            "service-detail",
+            views.ServiceDetail,
+            {
+                "pk": 1,
+                "permission": "service_viewer",
+                "model": models.Service,
+                "permission_object_pk": 1,
+            },
+        ),
+        (
+            "project-detail",
+            views.ProjectDetail,
+            {
+                "pk": 1,
+                "permission": "project_viewer",
+                "model": models.Project,
+                "permission_object_pk": 1,
+            },
+        ),
+        (
+            "project-exporter",
+            views.ExporterRegister,
+            {
+                "pk": 1,
+                "permission": "project_editor",
+                "model": models.Project,
+                "permission_object_pk": 1,
+            },
+        ),
+        (
+            "project-notifier",
+            views.ProjectNotifierRegister,
+            {
+                "pk": 1,
+                "permission": "project_editor",
+                "model": models.Project,
+                "permission_object_pk": 1,
+            },
+        ),
         ("url-list", views.URLList, {}),
         ("farm-list", views.FarmList, {}),
-        ("farm-detail", views.FarmDetail, {"pk": 1}),
+        (
+            "farm-detail",
+            views.FarmDetail,
+            {
+                "pk": 1,
+                "permission": "project_viewer",
+                "model": models.Project,
+                "permission_object_pk": 1,
+            },
+        ),
         ("host-list", views.HostList, {}),
-        ("host-detail", views.HostDetail, {"slug": "example.com"}),
+        (
+            "host-detail",
+            views.HostDetail,
+            {
+                "slug": "example.com",
+                "permission": "project_viewer",
+                "model": models.Project,
+                "permission_object_pk": 1,
+            },
+        ),
         ("rules-list", views.RulesList, {}),
         ("rule-detail", views.RuleDetail, {"pk": 1}),
         ("audit-list", views.AuditList, {}),
@@ -32,7 +90,17 @@ class WebTests(tests.PromgenTest):
         # so we expect this page to redirect to 302
         ("import", views.Import, {"status_code": 302}),
         ("alert-list", views.AlertList, {}),
-        ("alert-detail", views.AlertDetail, {"pk": 1}),
+        (
+            "alert-detail",
+            views.AlertDetail,
+            {
+                "pk": 1,
+                "permission": "service_viewer",
+                "model": models.Service,
+                "permission_object_pk": 1,
+            },
+        ),
+        ("metrics", views.Metrics, {}),
     ]
 
     def setUp(self):
@@ -40,6 +108,13 @@ class WebTests(tests.PromgenTest):
 
     def test_routes(self):
         for viewname, viewclass, params in self.route_map:
+            permission = params.pop("permission", None)
+            permission_model = params.pop("model", None)
+            permission_object_pk = params.pop("permission_object_pk", None)
+            if permission and permission_model and permission_object_pk:
+                permission_object = permission_model.objects.get(pk=permission_object_pk)
+                assign_perm(permission, self.user, permission_object)
+
             # By default we'll pass all params as-is to our reverse()
             # method, but we may have a few special ones (like status_code)
             # that we want to pop and handle separately
@@ -49,3 +124,359 @@ class WebTests(tests.PromgenTest):
             with self.subTest(viewname=viewname, params=params):
                 response = self.client.get(reverse(viewname, kwargs=params))
                 self.assertRoute(response, viewclass, status_code)
+
+            if permission and permission_model and permission_object_pk:
+                permission_object = permission_model.objects.get(pk=permission_object_pk)
+                remove_perm(permission, self.user, permission_object)
+
+    def test_delete_project_without_farm(self):
+        # Create a project without associating it with a farm
+        shard = models.Shard.objects.get(pk=1)
+        service = models.Service.objects.get(pk=1)
+        project = models.Project.objects.create(
+            name="test delete project",
+            owner=self.user,
+            service=service,
+            shard=shard,
+        )
+
+        self.assertFalse(hasattr(project, "farm"))
+
+        # Attempt to delete the project
+        response = self.client.post(reverse("project-delete", kwargs={"pk": project.pk}))
+
+        # Assert the project is deleted successfully
+        self.assertEqual(response.status_code, 302)
+        self.assertFalse(models.Project.objects.filter(pk=project.pk).exists())
+
+    def test_merge_users(self):
+        from django.contrib.auth.models import User
+        from guardian.models import UserObjectPermission
+        from guardian.shortcuts import assign_perm
+        from social_django.models import UserSocialAuth
+
+        from promgen.notification.email import NotificationEmail
+        from promgen.notification.user import NotificationUser
+
+        test_shard = models.Shard.objects.get(pk=1)
+        test_service = models.Service.objects.get(pk=1)
+
+        user_to_merge_from = User.objects.create_user(username="user_to_merge_from")
+        user_to_merge_into = User.objects.create_user(username="user_to_merge_into")
+        social_auth = UserSocialAuth.objects.create(
+            provider="github",
+            uid="12345",
+            user=user_to_merge_from,
+        )
+
+        service = models.Service.objects.create(name="Service", owner=user_to_merge_from)
+        project = models.Project.objects.create(
+            name="Project", owner=user_to_merge_from, service=service, shard=test_shard
+        )
+        sender_email = NotificationEmail.create(
+            obj=service, value="example@example.com", owner=user_to_merge_from
+        )
+        sender_user = NotificationUser.create(
+            obj=service, value=user_to_merge_from.pk, owner=user_to_merge_from
+        )
+        assign_perm("service_viewer", user_to_merge_from, test_service)
+
+        group = models.Group.objects.get(pk=1)
+        user_to_merge_from.groups.add(group)
+        assign_perm("group_admin", user_to_merge_from, group)
+        assign_perm("group_member", user_to_merge_into, group)
+
+        self.force_login(username="admin")
+        response = self.client.post(
+            reverse("admin:user-merge"),
+            {
+                "user_to_merge_from": user_to_merge_from.username,
+                "user_to_merge_into": user_to_merge_into.username,
+            },
+        )
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(
+            response.url,
+            reverse("admin:auth_user_changelist"),
+            "Redirected back to user changelist after merge",
+        )
+
+        social_auth.refresh_from_db()
+        service.refresh_from_db()
+        project.refresh_from_db()
+        sender_email.refresh_from_db()
+        sender_user.refresh_from_db()
+
+        self.assertTrue(
+            social_auth.user == user_to_merge_into,
+            "Social auth transferred to the user to merge into",
+        )
+        self.assertTrue(
+            service.owner == user_to_merge_into, "Service owner changed to the user to merge into"
+        )
+        self.assertTrue(
+            project.owner == user_to_merge_into, "Project owner changed to the user to merge into"
+        )
+        self.assertTrue(
+            sender_email.owner == user_to_merge_into,
+            "Sender owner changed to the user to merge into",
+        )
+        self.assertTrue(
+            sender_user.owner == user_to_merge_into,
+            "Sender owner changed to the user to merge into",
+        )
+        self.assertTrue(
+            sender_user.value == str(user_to_merge_into.pk),
+            "Sender value changed to the user to merge into",
+        )
+        self.assertEqual(
+            UserObjectPermission.objects.filter(
+                user=user_to_merge_into,
+                object_pk=service.pk,
+                content_type__app_label="promgen",
+                content_type__model="service",
+            ).count(),
+            1,
+            "New owner has only one permission on service",
+        )
+        self.assertTrue(
+            user_to_merge_into.has_perm("service_admin", service), "New owner has ADMIN permission"
+        )
+        self.assertEqual(
+            UserObjectPermission.objects.filter(
+                user=user_to_merge_into,
+                object_pk=project.pk,
+                content_type__app_label="promgen",
+                content_type__model="project",
+            ).count(),
+            1,
+            "New owner has only one permission on project",
+        )
+        self.assertTrue(
+            user_to_merge_into.has_perm("project_admin", project), "New owner has ADMIN permission"
+        )
+        self.assertTrue(
+            user_to_merge_into.has_perm("service_viewer", test_service),
+            "The user to merge into inherit existing permissions",
+        )
+        self.assertTrue(
+            user_to_merge_into.groups.filter(pk=group.pk).exists(),
+            "The user to merge into inherit group membership",
+        )
+        self.assertEqual(
+            UserObjectPermission.objects.filter(
+                user=user_to_merge_into,
+                object_pk=group.pk,
+                content_type__app_label="auth",
+                content_type__model="group",
+            ).count(),
+            1,
+            "New owner has only one permission on group",
+        )
+        self.assertTrue(
+            user_to_merge_into.has_perm("group_admin", group),
+            "The user to merge into inherit the highest permission on group",
+        )
+        self.assertFalse(
+            UserObjectPermission.objects.filter(user_id=user_to_merge_from.pk).exists(),
+            "The user to merge from's object permissions deleted",
+        )
+        self.assertFalse(
+            User.objects.filter(pk=user_to_merge_from.pk).exists(),
+            "The user to merge from was deleted",
+        )
+
+    def test_merge_users_no_permissions(self):
+        self.force_login(username="demo")
+
+        response = self.client.post(reverse("admin:user-merge"))
+
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(
+            response.url,
+            reverse("admin:login") + "?next=" + reverse("admin:user-merge"),
+            "Non-admin user redirected to login page",
+        )
+
+    def test_register_exporter(self):
+        self.force_login(username="demo")
+        assign_perm("project_editor", self.user, models.Project.objects.get(pk=1))
+
+        # Check creating an exporter with just the required fields and no path
+        response = self.client.post(
+            reverse("project-exporter", kwargs={"pk": 1}),
+            {"job": "node", "port": 9101, "scheme": "http"},
+        )
+        self.assertEqual(
+            response.status_code, 302, msg="Exporter created successfully without path"
+        )
+
+        # Check successfully creating an exporter with query parameters in the path
+        response = self.client.post(
+            reverse("project-exporter", kwargs={"pk": 1}),
+            {
+                "job": "node",
+                "port": 9101,
+                "scheme": "http",
+                "path": "/metrics?param1=foo&param2=bar",
+            },
+        )
+        self.assertEqual(response.status_code, 302)
+        self.assertTrue(
+            models.Exporter.objects.filter(
+                path="/metrics?param1=foo&param2=bar",
+            ).exists(),
+            "Exporter with query parameters in path created successfully",
+        )
+
+        # Check creating an exporter with array query parameter should not be allowed
+        response = self.client.post(
+            reverse("project-exporter", kwargs={"pk": 1}),
+            {
+                "job": "node",
+                "port": 9101,
+                "scheme": "http",
+                "path": "/metrics?list[]=foo&list[]=bar",
+            },
+        )
+        self.assertEqual(response.status_code, 200, msg="Exporter created failed")
+        self.assertEqual(
+            response.context_data["form"].errors,
+            {"path": ["List values are currently not supported for query parameters."]},
+            msg="Exporter with array query parameters should not be allowed",
+        )
+
+        # Check creating an exporter with redundant query parameters should be cleaned up
+        response = self.client.post(
+            reverse("project-exporter", kwargs={"pk": 1}),
+            {
+                "job": "node",
+                "port": 9101,
+                "scheme": "http",
+                "path": "/metrics?param=value&param&param=",
+            },
+        )
+        self.assertEqual(response.status_code, 302)
+        self.assertTrue(
+            models.Exporter.objects.filter(
+                path="/metrics?param=value",
+            ).exists(),
+            "Redundant query parameters should be cleaned up and exporter created successfully",
+        )
+
+    def test_custom_labels(self):
+        self.force_login(username="demo")
+
+        # Test creating a service with a custom label
+        response = self.client.post(
+            reverse("service-new"),
+            {
+                "name": "Test Custom Label",
+                "custom_label_test_label": "new_label_value",
+            },
+        )
+        self.assertEqual(response.status_code, 302)
+        new_service = models.Service.objects.get(name="Test Custom Label")
+        self.assertTrue(
+            models.CustomLabelInstance.objects.filter(
+                value="new_label_value", content_type__model="service", object_id=new_service.pk
+            ).exists(),
+            "",
+        )
+
+        # Test updating a service with a required custom label
+        custom_label = models.CustomLabel.objects.get(pk=1)
+        custom_label.is_required = True
+        custom_label.save()
+        response = self.client.post(
+            reverse("service-update", kwargs={"pk": new_service.pk}),
+            {
+                "name": "Test Custom Label",
+                "owner": 1,
+                "custom_label_test_label": "",
+            },
+        )
+        self.assertEqual(response.status_code, 200, msg="Service updated failed")
+        self.assertEqual(
+            response.context_data["form"].errors,
+            {"custom_label_test_label": ["This field is required."]},
+            msg="Required custom label should not be empty",
+        )
+
+        response = self.client.post(
+            reverse("service-update", kwargs={"pk": new_service.pk}),
+            {
+                "name": "Test Custom Label",
+                "owner": 1,
+                "custom_label_test_label": "updated_label_value",
+            },
+        )
+        self.assertEqual(response.status_code, 302)
+        self.assertTrue(
+            models.CustomLabelInstance.objects.filter(
+                value="updated_label_value", content_type__model="service", object_id=new_service.pk
+            ).exists(),
+            "Required custom label value should be updated successfully",
+        )
+
+        # Test deleting a service with a custom label
+        response = self.client.delete(
+            reverse("service-delete", kwargs={"pk": new_service.pk}),
+        )
+        self.assertEqual(response.status_code, 302)
+        self.assertFalse(
+            models.CustomLabelInstance.objects.filter(
+                value="updated_label_value", content_type__model="service", object_id=new_service.pk
+            ).exists(),
+            "Required custom label value should be deleted within the service deletion process",
+        )
+
+    @patch("promgen.signals.prometheus.check_rules")
+    def test_rule_override_invalid_inheritance(self, mock_check_rules):
+        service = models.Service.objects.get(pk=1)
+        project = models.Project.objects.get(pk=1)
+        assign_perm("service_editor", self.user, service)
+        service_rule = models.Rule.objects.create(
+            name="Service Rule", clause="up == 0", duration="1m", content_object=service
+        )
+        project_rule = models.Rule.objects.get(pk=2)
+        other_service_rule = models.Rule.objects.create(
+            name="Other Service Rule",
+            clause="up == 0",
+            duration="1m",
+            content_object=models.Service.objects.get(pk=2),
+        )
+        other_project_rule = models.Rule.objects.create(
+            name="Other Project Rule",
+            clause="up == 0",
+            duration="1m",
+            content_object=models.Project.objects.get(pk=2),
+        )
+        service_error = "Service Rule must be inherited from a Site Rule."
+        project_error = (
+            "Project Rule must be inherited from a Site Rule or its parent Service Rule."
+        )
+        for original, destination, error in (
+            (service_rule, service, service_error),
+            (other_service_rule, service, service_error),
+            (project_rule, service, service_error),
+            (other_service_rule, project, project_error),
+            (project_rule, project, project_error),
+            (other_project_rule, project, project_error),
+        ):
+            with self.subTest(original=original.name, destination=destination.name):
+                count = models.Rule.objects.count()
+                self.client.cookies.pop("messages", None)
+                response = self.client.post(
+                    reverse("rule-override", kwargs={"pk": original.pk}),
+                    {"content_type": destination._meta.model_name, "object_id": destination.pk},
+                )
+                self.assertEqual(response.status_code, 302)
+                self.assertEqual(response["Location"], destination.get_absolute_url() + "#rules")
+                errors = [
+                    str(message)
+                    for message in get_messages(response.wsgi_request)
+                    if message.level == ERROR
+                ]
+                self.assertEqual(errors, [error])
+                self.assertEqual(models.Rule.objects.count(), count)

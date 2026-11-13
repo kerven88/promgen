@@ -3,9 +3,10 @@
 
 from unittest import mock
 
+from django.contrib.auth.models import Permission
 from django.test import override_settings
 
-from promgen import models, tests, rest
+from promgen import models, rest, tests
 from promgen.notification.linenotify import NotificationLineNotify
 
 
@@ -13,9 +14,20 @@ class LineNotifyTest(tests.PromgenTest):
     def setUp(self):
         one = models.Project.objects.get(pk=1)
         two = models.Service.objects.get(pk=2)
+        self.user = self.force_login(username="demo")
 
-        NotificationLineNotify.create(obj=one, value="hogehoge")
-        NotificationLineNotify.create(obj=two, value="asdfasdf")
+        NotificationLineNotify.create(obj=one, value="hogehoge", owner=self.user)
+        NotificationLineNotify.create(obj=two, value="asdfasdf", owner=self.user)
+
+        # We disable all other senders to ensure that only our LINENotify sender is triggered
+        # during this test.
+        models.Sender.objects.exclude(sender=NotificationLineNotify.__module__).update(
+            enabled=False
+        )
+
+        self.user = self.force_login(username="demo")
+        permission = Permission.objects.get(codename="process_alert")
+        self.user.user_permissions.add(permission)
 
     @override_settings(PROMGEN=tests.SETTINGS)
     @override_settings(CELERY_TASK_ALWAYS_EAGER=True)
